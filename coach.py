@@ -26,6 +26,28 @@ SYSTEM = """Ты — персональный фитнес-тренер и ну�
 TIMEOUT = 45
 
 
+def _post(url, **kw):
+    """POST с повтором: прокси PythonAnywhere иногда отвечает 503, у Google бывают 500/503."""
+    import time
+
+    last = None
+    for attempt in range(3):
+        try:
+            r = requests.post(url, timeout=TIMEOUT, **kw)
+            if r.status_code in (500, 502, 503, 504) and attempt < 2:
+                time.sleep(2)
+                continue
+            r.raise_for_status()
+            return r
+        except requests.exceptions.ProxyError as e:
+            last = e
+            time.sleep(2)
+        except requests.exceptions.ConnectionError as e:
+            last = e
+            time.sleep(2)
+    raise last
+
+
 def provider():
     if os.getenv("ANTHROPIC_API_KEY"):
         return "claude"
@@ -50,7 +72,7 @@ def _system_for(user):
 
 def _gemini(system, question):
     model = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
-    r = requests.post(
+    r = _post(
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         headers={"x-goog-api-key": os.environ["GEMINI_API_KEY"]},
         json={
@@ -58,15 +80,13 @@ def _gemini(system, question):
             "contents": [{"role": "user", "parts": [{"text": question}]}],
             "generationConfig": {"maxOutputTokens": 1500, "temperature": 0.6},
         },
-        timeout=TIMEOUT,
     )
-    r.raise_for_status()
     parts = r.json()["candidates"][0]["content"]["parts"]
     return "".join(p.get("text", "") for p in parts)
 
 
 def _groq(system, question):
-    r = requests.post(
+    r = _post(
         "https://api.groq.com/openai/v1/chat/completions",
         headers={"Authorization": f"Bearer {os.environ['GROQ_API_KEY']}"},
         json={
@@ -75,9 +95,7 @@ def _groq(system, question):
             "max_tokens": 1500,
             "temperature": 0.6,
         },
-        timeout=TIMEOUT,
     )
-    r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"]
 
 
@@ -108,7 +126,7 @@ FOOD_PROMPT = """Ты нутрициолог. Определи, что съел 
 
 def _gemini_food(parts):
     model = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
-    r = requests.post(
+    r = _post(
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         headers={"x-goog-api-key": os.environ["GEMINI_API_KEY"]},
         json={
@@ -116,9 +134,7 @@ def _gemini_food(parts):
             "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json",
                                  "maxOutputTokens": 2000},
         },
-        timeout=TIMEOUT,
     )
-    r.raise_for_status()
     return "".join(p.get("text", "") for p in r.json()["candidates"][0]["content"]["parts"])
 
 
@@ -126,7 +142,7 @@ def _groq_food(text, image_b64):
     content = [{"type": "text", "text": text}]
     if image_b64:
         content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}})
-    r = requests.post(
+    r = _post(
         "https://api.groq.com/openai/v1/chat/completions",
         headers={"Authorization": f"Bearer {os.environ['GROQ_API_KEY']}"},
         json={
@@ -136,9 +152,7 @@ def _groq_food(text, image_b64):
             "temperature": 0.2,
             "max_tokens": 1500,
         },
-        timeout=TIMEOUT,
     )
-    r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"]
 
 

@@ -523,7 +523,8 @@ def answer_with_coach(chat, uid, question):
         elif code in (401, 403):
             reply = "AI-тренер не принял ключ. Проверь ключ в файле .env и нажми Reload на вкладке Web."
         else:
-            reply = "Не получилось связаться с AI-тренером, попробуй ещё раз через минуту."
+            reply = (f"Не получилось связаться с AI-тренером (код: {code or type(e).__name__}). "
+                     "Попробуй через минуту. Если повторяется — в консоли PythonAnywhere: python3.12 check_ai.py")
     send(chat, reply, parse_mode=None, reply_markup=menu_kb())
 
 
@@ -614,7 +615,8 @@ def ai_error_text(e):
         return "AI сейчас перегружен (лимит бесплатного тарифа). Попробуй через минуту."
     if code in (401, 403):
         return "AI не принял ключ. Проверь ключ (<code>python3.12 set_key.py</code>) и нажми Reload."
-    return "Не получилось распознать, попробуй ещё раз через минуту или запиши текстом: /eat гречка 200 г"
+    return (f"Не получилось распознать (код: {code or type(e).__name__}). Попробуй через минуту "
+            "или запиши текстом: /eat гречка 200 г. Если повторяется — <code>python3.12 check_ai.py</code>")
 
 
 def analyze_and_confirm(chat, uid, text="", image_bytes=None):
