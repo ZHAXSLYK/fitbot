@@ -34,6 +34,15 @@ CREATE TABLE IF NOT EXISTS workouts(
 CREATE TABLE IF NOT EXISTS states(
     user_id INTEGER PRIMARY KEY, state TEXT, data TEXT
 );
+CREATE TABLE IF NOT EXISTS meals(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER, day TEXT, time TEXT, title TEXT,
+    kcal INTEGER, protein INTEGER, fat INTEGER, carbs INTEGER
+);
+CREATE INDEX IF NOT EXISTS meals_user_day ON meals(user_id, day);
+CREATE TABLE IF NOT EXISTS pending_meals(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, data TEXT, created TEXT
+);
 """
 
 
@@ -108,6 +117,58 @@ def workouts_count(user_id, since=None):
         sql += " AND day>=?"
         args.append(since)
     return _all(sql, args)[0]["n"]
+
+
+# ---------- дневник питания ----------
+
+def add_meal(user_id, day, time, title, kcal, protein, fat, carbs):
+    _exec("INSERT INTO meals(user_id, day, time, title, kcal, protein, fat, carbs) VALUES(?,?,?,?,?,?,?,?)",
+          (user_id, day, time, title, kcal, protein, fat, carbs))
+
+
+def meals_for_day(user_id, day):
+    return [dict(r) for r in _all("SELECT * FROM meals WHERE user_id=? AND day=? ORDER BY time, id",
+                                  (user_id, day))]
+
+
+def day_totals(user_id, day):
+    r = _all("SELECT COUNT(*) AS n, COALESCE(SUM(kcal),0) AS kcal, COALESCE(SUM(protein),0) AS protein, "
+             "COALESCE(SUM(fat),0) AS fat, COALESCE(SUM(carbs),0) AS carbs FROM meals WHERE user_id=? AND day=?",
+             (user_id, day))[0]
+    return dict(r)
+
+
+def avg_kcal(user_id, since, until):
+    """Средние калории за дни, в которые что-то записано."""
+    r = _all("SELECT COUNT(*) AS days, COALESCE(AVG(s),0) AS avg FROM "
+             "(SELECT SUM(kcal) AS s FROM meals WHERE user_id=? AND day>=? AND day<=? GROUP BY day)",
+             (user_id, since, until))[0]
+    return r["days"], int(round(r["avg"]))
+
+
+def delete_last_meal(user_id, day):
+    rows = _all("SELECT id, title, kcal FROM meals WHERE user_id=? AND day=? ORDER BY id DESC LIMIT 1",
+                (user_id, day))
+    if not rows:
+        return None
+    _exec("DELETE FROM meals WHERE id=?", (rows[0]["id"],))
+    return dict(rows[0])
+
+
+def save_pending(user_id, data, created):
+    with closing(_conn()) as c, c:
+        cur = c.execute("INSERT INTO pending_meals(user_id, data, created) VALUES(?,?,?)",
+                        (user_id, json.dumps(data, ensure_ascii=False), created))
+        c.execute("DELETE FROM pending_meals WHERE user_id=? AND id < ?", (user_id, cur.lastrowid - 20))
+        return cur.lastrowid
+
+
+def pop_pending(user_id, pid):
+    rows = _all("SELECT data FROM pending_meals WHERE id=? AND user_id=?", (pid, user_id))
+    if not rows:
+        return None
+    _exec("DELETE FROM pending_meals WHERE id=?", (pid,))
+    return json.loads(rows[0]["data"])
 
 
 # ---------- состояние диалога ----------
