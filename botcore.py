@@ -488,7 +488,7 @@ def c_ask(m):
 
 def ask_button(chat, uid):
     if not coach.enabled():
-        return bot.send_message(chat, "AI-тренер выключен — нужен ANTHROPIC_API_KEY в .env (см. README).")
+        return bot.send_message(chat, "AI-тренер выключен — добавь бесплатный ключ GEMINI_API_KEY в файл .env (см. README).")
     store.set_state(uid, "wait_ask")
     bot.send_message(chat, "Спрашивай: рецепт под Термомикс, замена упражнения, меню на день — что угодно.")
 
@@ -500,9 +500,15 @@ def answer_with_coach(chat, uid, question):
     bot.send_chat_action(chat, "typing")
     try:
         reply = coach.ask(question, u)
-    except Exception:
+    except Exception as e:
         logging.exception("coach error")
-        reply = "Не получилось связаться с AI-тренером, попробуй ещё раз через минуту."
+        code = getattr(getattr(e, "response", None), "status_code", None)
+        if code == 429:
+            reply = "AI-тренер сейчас перегружен (лимит бесплатного тарифа). Попробуй через минуту."
+        elif code in (401, 403):
+            reply = "AI-тренер не принял ключ. Проверь ключ в файле .env и нажми Reload на вкладке Web."
+        else:
+            reply = "Не получилось связаться с AI-тренером, попробуй ещё раз через минуту."
     send(chat, reply, parse_mode=None, reply_markup=menu_kb())
 
 

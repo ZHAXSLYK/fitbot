@@ -21,11 +21,12 @@ def main():
     if ":" not in token:
         sys.exit("Похоже, это не токен. Он выглядит так: 123456789:AAH...")
     user = ask("2) Логин на PythonAnywhere", os.getenv("USER", ""))
-    api_key = ask("3) Ключ Claude API для AI-тренера (Enter — пропустить)")
+    api_key = ask("3) Ключ Gemini для AI-тренера, бесплатно с aistudio.google.com (Enter — пропустить)")
     secret = secrets.token_hex(16)
 
     with open(os.path.join(HERE, ".env"), "w", encoding="utf-8") as f:
-        f.write(f"BOT_TOKEN={token}\nWEBHOOK_SECRET={secret}\nANTHROPIC_API_KEY={api_key}\nTZ_NAME=Asia/Almaty\n")
+        f.write(f"BOT_TOKEN={token}\nWEBHOOK_SECRET={secret}\nGEMINI_API_KEY={api_key}\n"
+                f"GROQ_API_KEY=\nANTHROPIC_API_KEY=\nTZ_NAME=Asia/Almaty\n")
     print("✔ Настройки сохранены в .env")
 
     wsgi = f"/var/www/{user.lower()}_pythonanywhere_com_wsgi.py"
