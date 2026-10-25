@@ -18,7 +18,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(HERE, ".env"))
 
 import telebot  # noqa: E402
-from telebot import types  # noqa: E402
+from telebot import apihelper, types  # noqa: E402
+
+# Прокси бесплатного PythonAnywhere иногда отвечает 503 — повторяем запрос
+apihelper.RETRY_ON_ERROR = True
+apihelper.MAX_RETRIES = 5
+apihelper.RETRY_TIMEOUT = 2
 
 import calc  # noqa: E402
 import coach  # noqa: E402

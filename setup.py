@@ -5,6 +5,7 @@
 import os
 import secrets
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -39,11 +40,23 @@ def main():
 
     from botcore import bot, setup_commands  # импорт после записи .env
 
-    me = bot.get_me()
     url = f"https://{user.lower()}.pythonanywhere.com/{secret}"
-    bot.remove_webhook()
-    bot.set_webhook(url=url, secret_token=secret, drop_pending_updates=True)
-    setup_commands()
+    print("… Подключаюсь к Telegram (если прокси PythonAnywhere занят — повторю сам)")
+    for attempt in range(1, 11):
+        try:
+            me = bot.get_me()
+            bot.remove_webhook()
+            bot.set_webhook(url=url, secret_token=secret, drop_pending_updates=True)
+            setup_commands()
+            break
+        except Exception as e:
+            msg = str(e).replace(token, "<ТОКЕН>")
+            if "401" in msg or "Unauthorized" in msg:
+                sys.exit("✖ Telegram не принял токен. Проверь, что скопировал его целиком, и запусти снова.")
+            print(f"  попытка {attempt}/10 не удалась ({msg[-80:]}), жду 15 сек…")
+            time.sleep(15)
+    else:
+        sys.exit("✖ Telegram сейчас недоступен через прокси PythonAnywhere. Запусти setup.py ещё раз через 10–15 минут.")
     print(f"✔ Вебхук установлен для @{me.username}")
     print("\nОсталось: вкладка Web → зелёная кнопка Reload, потом напиши боту /start\n")
 
