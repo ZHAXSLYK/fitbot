@@ -26,15 +26,15 @@ SYSTEM = """Ты — персональный фитнес-тренер и ну�
 TIMEOUT = 45
 
 
-def _post(url, **kw):
+def _post(url, attempts=3, **kw):
     """POST с повтором: прокси PythonAnywhere иногда отвечает 503, у Google бывают 500/503."""
     import time
 
     last = None
-    for attempt in range(3):
+    for attempt in range(attempts):
         try:
             r = requests.post(url, timeout=TIMEOUT, **kw)
-            if r.status_code in (500, 502, 503, 504) and attempt < 2:
+            if r.status_code in (500, 502, 503, 504) and attempt < attempts - 1:
                 time.sleep(2)
                 continue
             r.raise_for_status()
@@ -70,19 +70,35 @@ def _system_for(user):
     )
 
 
+# Если основная модель перегружена (503/429) — пробуем следующую
+GEMINI_MODELS = [m.strip() for m in os.getenv(
+    "GEMINI_MODEL", "gemini-flash-latest,gemini-flash-lite-latest").split(",") if m.strip()]
+
+
+def _gemini_call(body):
+    last = None
+    for model in GEMINI_MODELS:
+        try:
+            r = _post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                headers={"x-goog-api-key": os.environ["GEMINI_API_KEY"]},
+                json=body,
+                attempts=2,
+            )
+            return "".join(p.get("text", "") for p in r.json()["candidates"][0]["content"]["parts"])
+        except requests.exceptions.HTTPError as e:
+            last = e
+            if getattr(e.response, "status_code", None) not in (404, 429, 500, 503):
+                raise
+    raise last
+
+
 def _gemini(system, question):
-    model = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
-    r = _post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        headers={"x-goog-api-key": os.environ["GEMINI_API_KEY"]},
-        json={
-            "system_instruction": {"parts": [{"text": system}]},
-            "contents": [{"role": "user", "parts": [{"text": question}]}],
-            "generationConfig": {"maxOutputTokens": 1500, "temperature": 0.6},
-        },
-    )
-    parts = r.json()["candidates"][0]["content"]["parts"]
-    return "".join(p.get("text", "") for p in parts)
+    return _gemini_call({
+        "system_instruction": {"parts": [{"text": system}]},
+        "contents": [{"role": "user", "parts": [{"text": question}]}],
+        "generationConfig": {"maxOutputTokens": 1500, "temperature": 0.6},
+    })
 
 
 def _groq(system, question):
@@ -125,17 +141,10 @@ FOOD_PROMPT = """Ты нутрициолог. Определи, что съел 
 
 
 def _gemini_food(parts):
-    model = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
-    r = _post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        headers={"x-goog-api-key": os.environ["GEMINI_API_KEY"]},
-        json={
-            "contents": [{"role": "user", "parts": parts}],
-            "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json",
-                                 "maxOutputTokens": 2000},
-        },
-    )
-    return "".join(p.get("text", "") for p in r.json()["candidates"][0]["content"]["parts"])
+    return _gemini_call({
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json", "maxOutputTokens": 2000},
+    })
 
 
 def _groq_food(text, image_b64):

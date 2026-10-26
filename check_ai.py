@@ -34,12 +34,17 @@ try:
                                 "messages": [{"role": "user", "content": "Скажи «ок»"}]})
         ok = show(r)
     elif gem:
-        model = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
-        print(f"Используется Gemini, модель {model}. Проверяю…")
-        r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                          headers={"x-goog-api-key": gem}, timeout=40,
-                          json={"contents": [{"role": "user", "parts": [{"text": "Скажи «ок»"}]}]})
-        ok = show(r)
+        models = [m.strip() for m in os.getenv("GEMINI_MODEL", "gemini-flash-latest,gemini-flash-lite-latest").split(",")]
+        ok = False
+        for model in models:
+            print(f"Используется Gemini, модель {model}. Проверяю…")
+            r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                              headers={"x-goog-api-key": gem}, timeout=40,
+                              json={"contents": [{"role": "user", "parts": [{"text": "Скажи «ок»"}]}]})
+            ok = show(r)
+            if ok or r.status_code not in (429, 500, 503):
+                break
+            print("Модель занята — пробую запасную…\n")
         if r.status_code == 404:
             print("\nМодель не найдена. Доступные модели Flash для твоего ключа:")
             lst = requests.get("https://generativelanguage.googleapis.com/v1beta/models",

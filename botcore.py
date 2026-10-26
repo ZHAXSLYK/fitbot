@@ -65,6 +65,7 @@ COMMANDS = [
     ("shop", "Список покупок на неделю"),
     ("weight", "Записать вес: /weight 83.6"),
     ("progress", "Прогресс и тренд веса"),
+    ("week", "Итоги недели"),
     ("norm", "Моя норма КБЖУ"),
     ("ask", "Вопрос AI-тренеру"),
     ("remind", "Утренний план: /remind 7 или off"),
@@ -121,11 +122,53 @@ def next_workout(u, done):
     return prog[done % len(prog)]
 
 
-def workout_text(w):
+def scheme_info(scheme):
+    m = re.search(r"(\d+)×(\d+)(?:–(\d+))?", scheme)
+    sets, lo, hi = (int(m.group(1)), int(m.group(2)), int(m.group(3) or m.group(2))) if m else (3, 8, 12)
+    if "макс" in scheme:
+        hi = None
+    return {"sets": sets, "lo": lo, "hi": hi, "secs": bool(re.search(r"×\s*\d+(?:–\d+)?\s*сек", scheme))}
+
+
+def fmt_lift(l, secs=False):
+    reps = ",".join(str(r) for r in l["reps"])
+    if secs:
+        return f"{reps} сек"
+    w = f"{l['weight']:g} кг" if l["weight"] else "свой вес"
+    return f"{w} × {reps}"
+
+
+def lift_advice(name, scheme, last):
+    info = scheme_info(scheme)
+    if not last:
+        if info["secs"]:
+            return "Первый раз — держи, сколько получается с ровной спиной; запиши секунды каждого подхода."
+        return "Первый раз — подбери вес, с которым в последнем подходе остаётся 1–2 повтора в запасе."
+    reps, w = last["reps"], last["weight"]
+    if info["secs"]:
+        return "📈 Добавь 10 сек" if min(reps) >= (info["hi"] or 60) else f"Цель: {info['hi']} сек во всех подходах"
+    if info["hi"] is None:
+        return "📈 Попробуй на 1 повтор больше в каждом подходе"
+    done = len(reps) >= info["sets"] and min(reps[: info["sets"]]) >= info["hi"]
+    if not done:
+        return f"Цель: {info['hi']} повторов во всех {info['sets']} подходах{f' с {w:g} кг' if w else ''}"
+    if not w:
+        return "📈 Все повторы сделаны — добавь отягощение (пояс/гантель) или +2 повтора"
+    inc = 1 if "гантел" in name.lower() or w < 20 else 2.5
+    return f"📈 Пора добавить вес: {w + inc:g} кг"
+
+
+def workout_text(w, uid=None):
     lines = [f"🏋️ <b>{w['title']}</b>\n",
              "Разминка: 5–7 мин дорожка + 2 лёгких подхода первого упражнения.\n"]
-    lines += [f"{i}. <b>{n}</b> — {s}" for i, (n, s) in enumerate(w["exercises"], 1)]
+    for i, (n, sch) in enumerate(w["exercises"], 1):
+        lines.append(f"{i}. <b>{n}</b> — {sch}")
+        last = store.last_lift(uid, n) if uid else None
+        if last:
+            lines.append(f"    ↳ прошлый раз: {fmt_lift(last, scheme_info(sch)['secs'])} → {lift_advice(n, sch, last)}")
     lines += ["", PROGRESSION_NOTE, "", CARDIO_NOTE]
+    if uid:
+        lines.append("\n📝 Нажми «Записать веса» — запомню результаты и подскажу, когда добавлять вес.")
     return "\n".join(lines)
 
 
@@ -188,8 +231,12 @@ def morning_text(u):
     if y["n"]:
         yesterday = (f"📒 Вчера: {y['kcal']} из {u['kcal']} ккал, белок {y['protein']} из {u['protein']} г"
                      f"{' ✅' if y['kcal'] <= u['kcal'] * 1.05 else ' — перебор, сегодня без перекусов сверх меню'}.\n\n")
+    weekly = ""
+    if wd == 0:  # понедельник — итоги прошлой недели
+        start = today() - timedelta(days=7)
+        weekly = week_report(u, start, start + timedelta(days=6), "прошлой недели") + "\n\n"
     return (
-        f"☀️ Доброе утро, {html.escape(u.get('name') or 'чемпион')}!\n\n" + yesterday +
+        f"☀️ Доброе утро, {html.escape(u.get('name') or 'чемпион')}!\n\n" + weekly + yesterday +
         "1. Взвесься натощак и пришли число сюда.\n"
         f"2. Норма дня: {u['kcal']} ккал, белок {u['protein']} г.\n"
         f"3. {train}\n"
@@ -325,8 +372,9 @@ def show_workout(chat, uid):
     u = require_user(chat, uid)
     if u:
         w = next_workout(u, store.workouts_count(uid))
-        bot.send_message(chat, workout_text(w),
-                         reply_markup=ikb([[("✅ Тренировка сделана", f"done:{w['key']}")]]))
+        bot.send_message(chat, workout_text(w, uid),
+                         reply_markup=ikb([[("📝 Записать веса", f"lg:{w['key']}"),
+                                            ("✅ Сделана", f"done:{w['key']}")]]))
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("done:"))
@@ -425,8 +473,16 @@ def show_progress(chat, uid):
     days, avg = store.avg_kcal(uid, (d - timedelta(days=6)).isoformat(), d.isoformat())
     if days:
         lines.append(f"\n🍽 Питание за 7 дней: в среднем {avg} ккал при норме {u['kcal']} (записано дней: {days})")
+    hist = store.lift_history(uid)
+    grown = [(ex, h) for ex, h in hist.items() if h["n"] > 1 and h["first"]["weight"]]
+    if grown:
+        lines.append("\n💪 <b>Силовые</b> (первая запись → последняя):")
+        grown.sort(key=lambda x: x[1]["last"]["weight"] - x[1]["first"]["weight"], reverse=True)
+        for ex, h in grown[:6]:
+            a, b = h["first"]["weight"], h["last"]["weight"]
+            lines.append(f"{html.escape(ex)}: {a:g} → {b:g} кг ({b - a:+g})")
     lines.append("\n" + html.escape(tr["advice"]))
-    bot.send_message(chat, "\n".join(lines))
+    bot.send_message(chat, "\n".join(lines), reply_markup=ikb([[("📊 Итоги недели", "wk:7")]]))
 
 
 # ======================= команды =======================
@@ -526,6 +582,175 @@ def answer_with_coach(chat, uid, question):
             reply = (f"Не получилось связаться с AI-тренером (код: {code or type(e).__name__}). "
                      "Попробуй через минуту. Если повторяется — в консоли PythonAnywhere: python3.12 check_ai.py")
     send(chat, reply, parse_mode=None, reply_markup=menu_kb())
+
+
+# ======================= журнал весов =======================
+
+LIFT_HELP = ("Пришли вес и повторы через пробел: <code>60 8 8 7 7</code>\n"
+             "Свой вес — ноль: <code>0 12 10 10</code> · Планка — секунды: <code>0 45 50 40</code>")
+
+
+def find_workout(key):
+    for prog in PROGRAMS.values():
+        for w in prog:
+            if w["key"] == key:
+                return w
+    return None
+
+
+def ask_lift(chat, uid, data):
+    w = find_workout(data["key"])
+    name, sch = w["exercises"][data["idx"]]
+    last = store.last_lift(uid, name)
+    lines = [f"📝 {data['idx'] + 1}/{len(w['exercises'])} <b>{name}</b> — {sch}"]
+    if last:
+        lines.append(f"Прошлый раз ({last['day'][8:10]}.{last['day'][5:7]}): {fmt_lift(last, scheme_info(sch)['secs'])}")
+    lines.append(lift_advice(name, sch, last))
+    lines.append("\n" + LIFT_HELP)
+    store.set_state(uid, "wait_lift", data)
+    bot.send_message(chat, "\n".join(lines), reply_markup=ikb([[("⏭ Пропустить", "lgs:skip"), ("🏁 Закончить", "lgs:end")]]))
+
+
+def finish_lifts(chat, uid, data):
+    store.clear_state(uid)
+    u = store.get_user(uid)
+    if not data.get("logged"):
+        return bot.send_message(chat, "Ничего не записал. Веса можно внести в любой момент кнопкой 📝 у тренировки.",
+                                reply_markup=menu_kb())
+    d = today()
+    if not store.workout_logged(uid, d.isoformat(), data["key"]):
+        store.log_workout(uid, d.isoformat(), data["key"])
+    week = store.workouts_count(uid, since=(d - timedelta(days=d.weekday())).isoformat())
+    nxt = next_workout(u, store.workouts_count(uid))
+    rec = f"\n🏆 Рекорды: {', '.join(data['records'])}" if data.get("records") else ""
+    bot.send_message(
+        chat,
+        f"🏁 <b>Тренировка записана!</b> Упражнений: {data['logged']}, тоннаж: {int(data.get('volume', 0))} кг{rec}\n"
+        f"На этой неделе: {week} из {u['days']}. Следующая — <b>{nxt['title']}</b>.\n\n"
+        "Сейчас — белок + углеводы: протеиновый смузи, рецепт №16.",
+        reply_markup=ikb([[("🥤 Рецепт смузи", "r:16")]]),
+    )
+
+
+def next_lift(chat, uid, data):
+    data["idx"] += 1
+    if data["idx"] >= len(find_workout(data["key"])["exercises"]):
+        return finish_lifts(chat, uid, data)
+    ask_lift(chat, uid, data)
+
+
+def lift_input(chat, uid, text, data):
+    t = (text or "").strip().lower()
+    if t in ("-", "—", "пропустить", "skip"):
+        return next_lift(chat, uid, data)
+    if t in ("стоп", "всё", "все", "конец", "stop"):
+        return finish_lifts(chat, uid, data)
+    nums = [x.replace(",", ".") for x in re.findall(r"\d+(?:[.,]\d+)?", t)]
+    if len(nums) < 2:
+        return bot.send_message(chat, "Не понял 🙂 " + LIFT_HELP + "\nПропустить упражнение: <code>-</code>")
+    w = float(nums[0])
+    reps = [int(float(x)) for x in nums[1:9]]
+    if not (0 <= w <= 500 and all(0 < r <= 300 for r in reps)):
+        return bot.send_message(chat, "Проверь числа: вес 0–500 кг, повторы 1–300.")
+    name, sch = find_workout(data["key"])["exercises"][data["idx"]]
+    prev = store.lift_history(uid).get(name)
+    best = max(prev["first"]["weight"], prev["last"]["weight"]) if prev else None
+    store.add_lift(uid, today().isoformat(), name, w, reps)
+    data["logged"] = data.get("logged", 0) + 1
+    data["volume"] = data.get("volume", 0) + w * sum(reps)
+    note = ""
+    if best is not None and w > best and w > 0:
+        note = " 🏆 новый рекорд!"
+        data.setdefault("records", []).append(f"{name} {w:g} кг")
+    bot.send_message(chat, f"✔ {name}: {fmt_lift({'weight': w, 'reps': reps}, scheme_info(sch)['secs'])}{note}")
+    next_lift(chat, uid, data)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.split(":")[0] in ("lg", "lgs"))
+def lift_buttons(c):
+    uid, chat = c.from_user.id, c.message.chat.id
+    kind, val = c.data.split(":", 1)
+    bot.answer_callback_query(c.id)
+    if not store.get_user(uid):
+        return
+    if kind == "lg":
+        if not find_workout(val):
+            return
+        _drop_kb(c)
+        return ask_lift(chat, uid, {"key": val, "idx": 0, "logged": 0, "volume": 0})
+    state, data = store.get_state(uid)
+    if state != "wait_lift":
+        return bot.send_message(chat, "Запись весов уже закончена.")
+    _drop_kb(c)
+    if val == "skip":
+        next_lift(chat, uid, data)
+    else:
+        finish_lifts(chat, uid, data)
+
+
+# ======================= итоги недели =======================
+
+def week_report(u, start, end, title):
+    uid = u["user_id"]
+    s, e = start.isoformat(), end.isoformat()
+    lines = [f"📊 <b>Итоги {title}</b> ({s[8:10]}.{s[5:7]}–{e[8:10]}.{e[5:7]})"]
+    wk = store.workouts_between(uid, s, e)
+    lines.append(f"🏋️ Тренировок: {wk} из {u['days']}" + (" ✅" if wk >= u["days"] else ""))
+    rows = store.get_weights(uid, 120)
+    cur, _ = calc._avg(rows, start, end)
+    prev, _ = calc._avg(rows, start - timedelta(days=7), start - timedelta(days=1))
+    if cur is not None and prev is not None:
+        lines.append(f"⚖️ Средний вес: {prev:.1f} → {cur:.1f} кг ({cur - prev:+.1f})")
+    elif cur is not None:
+        lines.append(f"⚖️ Средний вес: {cur:.1f} кг")
+    days, avg = store.avg_kcal(uid, s, e)
+    if days:
+        lines.append(f"🍽 Калории: в среднем {avg} при норме {u['kcal']} (записано дней: {days} из 7)")
+    grown = []
+    for ex, h in store.lift_history(uid, since=s).items():
+        before = store.last_lift(uid, ex, before_day=s)
+        if before and h["last"]["weight"] > before["weight"]:
+            grown.append(f"{ex} {before['weight']:g}→{h['last']['weight']:g}")
+    if grown:
+        lines.append("💪 Рост весов: " + "; ".join(grown[:5]))
+    # совет
+    tips = []
+    if wk < u["days"]:
+        tips.append(f"добери тренировки: цель {u['days']} в неделю")
+    if days and avg > u["kcal"] * 1.08:
+        tips.append("калорий больше нормы — убери перекусы вне меню")
+    if days and days < 4:
+        tips.append("записывай еду хотя бы 5 дней из 7 — фото в чат")
+    if cur is not None and prev is not None:
+        pct = (cur - prev) / prev * 100
+        if pct > -0.25 and days and avg <= u["kcal"] * 1.05:
+            tips.append("вес стоит при норме калорий — добавь 2–3 тыс. шагов в день")
+        elif pct < -1.2:
+            tips.append("худеешь слишком быстро — добавь ~150 ккал")
+        elif pct <= -0.25:
+            tips.append("темп отличный, так держать")
+    if tips:
+        lines.append("\n💡 " + "; ".join(tips).capitalize() + ".")
+    return "\n".join(lines)
+
+
+def show_week(chat, uid):
+    u = require_user(chat, uid)
+    if u:
+        d = today()
+        bot.send_message(chat, week_report(u, d - timedelta(days=6), d, "7 дней"))
+
+
+@bot.message_handler(commands=["week"])
+def c_week(m):
+    store.clear_state(m.from_user.id)
+    show_week(m.chat.id, m.from_user.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("wk:"))
+def week_button(c):
+    bot.answer_callback_query(c.id)
+    show_week(c.message.chat.id, c.from_user.id)
 
 
 # ======================= дневник питания =======================
@@ -823,6 +1048,8 @@ def on_text(m):
             return bot.send_message(chat, "Нужно число, например 83.6")
         store.clear_state(uid)
         return save_weight(chat, uid, kg)
+    if state == "wait_lift":
+        return lift_input(chat, uid, text, data)
     if state == "wait_eat":
         store.clear_state(uid)
         return log_food_text(chat, uid, text)

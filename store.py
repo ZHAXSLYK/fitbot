@@ -40,6 +40,11 @@ CREATE TABLE IF NOT EXISTS meals(
     kcal INTEGER, protein INTEGER, fat INTEGER, carbs INTEGER
 );
 CREATE INDEX IF NOT EXISTS meals_user_day ON meals(user_id, day);
+CREATE TABLE IF NOT EXISTS lifts(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER, day TEXT, exercise TEXT, weight REAL, reps TEXT
+);
+CREATE INDEX IF NOT EXISTS lifts_user_ex ON lifts(user_id, exercise);
 CREATE TABLE IF NOT EXISTS pending_meals(
     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, data TEXT, created TEXT
 );
@@ -169,6 +174,50 @@ def pop_pending(user_id, pid):
         return None
     _exec("DELETE FROM pending_meals WHERE id=?", (pid,))
     return json.loads(rows[0]["data"])
+
+
+# ---------- рабочие веса ----------
+
+def add_lift(user_id, day, exercise, weight, reps):
+    _exec("INSERT INTO lifts(user_id, day, exercise, weight, reps) VALUES(?,?,?,?,?)",
+          (user_id, day, exercise, weight, ",".join(str(r) for r in reps)))
+
+
+def last_lift(user_id, exercise, before_day=None):
+    sql, args = "SELECT * FROM lifts WHERE user_id=? AND exercise=?", [user_id, exercise]
+    if before_day:
+        sql += " AND day<?"
+        args.append(before_day)
+    rows = _all(sql + " ORDER BY day DESC, id DESC LIMIT 1", args)
+    if not rows:
+        return None
+    r = dict(rows[0])
+    r["reps"] = [int(x) for x in r["reps"].split(",") if x]
+    return r
+
+
+def lift_history(user_id, since=None):
+    """Первая и последняя запись по каждому упражнению (для прогресса)."""
+    sql, args = "SELECT exercise, day, weight, reps FROM lifts WHERE user_id=?", [user_id]
+    if since:
+        sql += " AND day>=?"
+        args.append(since)
+    out = {}
+    for r in _all(sql + " ORDER BY day, id", args):
+        e = out.setdefault(r["exercise"], {"first": dict(r), "last": dict(r), "n": 0})
+        e["last"] = dict(r)
+        e["n"] += 1
+    return out
+
+
+def workout_logged(user_id, day, key):
+    return _all("SELECT COUNT(*) AS n FROM workouts WHERE user_id=? AND day=? AND workout=?",
+                (user_id, day, key))[0]["n"] > 0
+
+
+def workouts_between(user_id, since, until):
+    return _all("SELECT COUNT(*) AS n FROM workouts WHERE user_id=? AND day>=? AND day<=?",
+                (user_id, since, until))[0]["n"]
 
 
 # ---------- состояние диалога ----------
