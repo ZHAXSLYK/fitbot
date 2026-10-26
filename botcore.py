@@ -26,6 +26,7 @@ apihelper.MAX_RETRIES = 5
 apihelper.RETRY_TIMEOUT = 2
 
 import calc  # noqa: E402
+import charts  # noqa: E402
 import coach  # noqa: E402
 import store  # noqa: E402
 from data import (  # noqa: E402
@@ -66,6 +67,8 @@ COMMANDS = [
     ("weight", "Записать вес: /weight 83.6"),
     ("progress", "Прогресс и тренд веса"),
     ("week", "Итоги недели"),
+    ("steps", "Шаги за сегодня: /steps 8500"),
+    ("water", "Вода: /water 500 (мл)"),
     ("norm", "Моя норма КБЖУ"),
     ("ask", "Вопрос AI-тренеру"),
     ("remind", "Утренний план: /remind 7 или off"),
@@ -208,6 +211,19 @@ def day_menu_kb(wd):
     return ikb(rows)
 
 
+STEP_BTNS = [("до 5к", 3000), ("5–8к", 6500), ("8–10к", 9000), ("10к+", 11500)]
+
+
+def morning_kb(wd):
+    kb = day_menu_kb(wd)
+    kb.row(*[types.InlineKeyboardButton(f"👣 {t}", callback_data=f"st:{v}") for t, v in STEP_BTNS])
+    return kb
+
+
+def water_goal(u):
+    return int(round(u["weight"] * 33 / 250) * 250)
+
+
 def shopping_text():
     parts = ["🛒 <b>Покупки на неделю</b> (под меню из «📅 Меню дня»)"]
     for group, items in SHOPPING.items():
@@ -240,7 +256,10 @@ def morning_text(u):
         "1. Взвесься натощак и пришли число сюда.\n"
         f"2. Норма дня: {u['kcal']} ккал, белок {u['protein']} г.\n"
         f"3. {train}\n"
-        "4. Еду записывай фото в этот чат — посчитаю КБЖУ.\n\n" + day_menu_text(wd)
+        "4. Еду записывай фото в этот чат — посчитаю КБЖУ.\n"
+        f"5. Вода сегодня: {water_goal(u) / 1000:g} л.\n\n"
+        "👣 <b>Сколько шагов было вчера?</b> Нажми кнопку внизу (точное число: /steps вчера 8540).\n\n"
+        + day_menu_text(wd)
     )
 
 
@@ -251,7 +270,7 @@ def send_morning(only_hour=None):
     sent = 0
     for u in store.users_to_remind(day, only_hour):
         try:
-            bot.send_message(u["user_id"], morning_text(u), reply_markup=day_menu_kb(now.weekday()))
+            bot.send_message(u["user_id"], morning_text(u), reply_markup=morning_kb(now.weekday()))
             sent += 1
         except Exception as e:  # пользователь мог заблокировать бота
             logging.warning("remind %s failed: %s", u["user_id"], e)
@@ -481,7 +500,19 @@ def show_progress(chat, uid):
         for ex, h in grown[:6]:
             a, b = h["first"]["weight"], h["last"]["weight"]
             lines.append(f"{html.escape(ex)}: {a:g} → {b:g} кг ({b - a:+g})")
+    da = store.daily_avgs(uid, (d - timedelta(days=6)).isoformat(), d.isoformat())
+    if da["steps"]:
+        lines.append(f"\n👣 Шаги за 7 дней: в среднем {da['steps']:,}".replace(",", " ") +
+                     (" ✅" if da["steps"] >= 8000 else " — цель 8–10 тыс."))
     lines.append("\n" + html.escape(tr["advice"]))
+    png = charts.weight_chart(rows) if len(rows) >= 3 else None
+    if png:
+        try:
+            bot.send_photo(chat, png)
+        except Exception:
+            logging.exception("chart send failed")
+    elif len(rows) < 3:
+        lines.append("\n📈 График веса появится после 3 взвешиваний.")
     bot.send_message(chat, "\n".join(lines), reply_markup=ikb([[("📊 Итоги недели", "wk:7")]]))
 
 
@@ -713,8 +744,15 @@ def week_report(u, start, end, title):
             grown.append(f"{ex} {before['weight']:g}→{h['last']['weight']:g}")
     if grown:
         lines.append("💪 Рост весов: " + "; ".join(grown[:5]))
+    da = store.daily_avgs(uid, s, e)
+    if da["steps"]:
+        lines.append(f"👣 Шаги: в среднем {da['steps']:,} в день".replace(",", " ") + f" (отмечено дней: {da['steps_days']})")
+    if da["water"]:
+        lines.append(f"💧 Вода: в среднем {da['water'] / 1000:.1f} л из {water_goal(u) / 1000:g} л")
     # совет
     tips = []
+    if da["steps"] and da["steps"] < 7000:
+        tips.append("шагов мало — цель 8–10 тыс. в день, это главный жиросжигатель вне зала")
     if wk < u["days"]:
         tips.append(f"добери тренировки: цель {u['days']} в неделю")
     if days and avg > u["kcal"] * 1.08:
@@ -776,13 +814,17 @@ def bar(done, total, width=10):
     return "▓" * filled + "░" * (width - filled)
 
 
-def day_summary(u, t):
+def day_summary(u, t, day=None):
     left = u["kcal"] - t["kcal"]
     left_txt = f"осталось <b>{left}</b>" if left >= 0 else f"перебор <b>{-left}</b>"
     lines = [
         f"🔥 {bar(t['kcal'], u['kcal'])} {t['kcal']} из {u['kcal']} ккал — {left_txt}",
         f"🥩 Белок {t['protein']}/{u['protein']} · Жиры {t['fat']}/{u['fat']} · Углеводы {t['carbs']}/{u['carbs']}",
     ]
+    dly = store.get_daily(u["user_id"], day or today().isoformat())
+    goal = water_goal(u)
+    steps = f" · 👣 {dly['steps']:,}".replace(",", " ") if dly["steps"] else ""
+    lines.append(f"💧 Вода {dly['water'] / 1000:g} из {goal / 1000:g} л {bar(dly['water'], goal, 6)}{steps}")
     hour = datetime.now(TZ).hour
     if t["n"] and hour >= 15 and t["protein"] < u["protein"] * 0.6:
         lines.append("💡 Белка мало — на ужин курица, рыба или творог (рецепты №11, №12, №17).")
@@ -801,7 +843,7 @@ def diary_text(u, day):
         lines.append("")
     else:
         lines.append("Пока пусто. <b>Сфотографируй еду и пришли сюда</b> — посчитаю КБЖУ и запишу.\n")
-    lines.append(day_summary(u, t))
+    lines.append(day_summary(u, t, day))
     return "\n".join(lines)
 
 
@@ -811,7 +853,7 @@ def diary_kb(day):
     rows = []
     if is_today:
         rows.append([("➕ Записать текстом", "eat:text"), ("↩ Удалить последнее", "eat:undo")])
-        rows.append([("◀️ Вчера", f"dy:{prev_day}")])
+        rows.append([("💧 +250 мл", "wt:250"), ("💧 +500 мл", "wt:500"), ("◀️ Вчера", f"dy:{prev_day}")])
     else:
         rows.append([("◀️ Раньше", f"dy:{prev_day}"), ("Сегодня ▶️", f"dy:{today().isoformat()}")])
     return ikb(rows)
@@ -955,6 +997,67 @@ def diary_buttons(c):
             bot.edit_message_text(diary_text(u, val), chat, c.message.message_id, reply_markup=diary_kb(val))
         except Exception:
             bot.send_message(chat, diary_text(u, val), reply_markup=diary_kb(val))
+
+
+# ======================= шаги и вода =======================
+
+def record_steps(chat, uid, steps, day):
+    if not 0 <= steps <= 100000:
+        return bot.send_message(chat, "Шагов должно быть от 0 до 100 000")
+    store.set_steps(uid, day.isoformat(), steps)
+    when = "сегодня" if day == today() else ("вчера" if day == today() - timedelta(days=1) else day.strftime("%d.%m"))
+    note = ("✅ Отлично!" if steps >= 10000 else "👍 Хорошо, цель 8–10 тыс." if steps >= 8000
+            else "Маловато — сегодня добавь прогулку 20–30 минут, это ≈3 тыс. шагов.")
+    num = f"{steps:,}".replace(",", " ")
+    bot.send_message(chat, f"👣 Записал {num} шагов за {when}. {note}")
+
+
+def record_water(chat, uid, ml):
+    u = store.get_user(uid)
+    store.add_water(uid, today().isoformat(), ml)
+    w = store.get_daily(uid, today().isoformat())["water"]
+    goal = water_goal(u)
+    done = " ✅ Норма выполнена!" if w >= goal else f" Осталось {(goal - w) / 1000:g} л."
+    bot.send_message(chat, f"💧 {w / 1000:g} из {goal / 1000:g} л {bar(w, goal, 8)}{done}",
+                     reply_markup=ikb([[("💧 +250 мл", "wt:250"), ("💧 +500 мл", "wt:500"), ("↩ −250", "wt:-250")]]))
+
+
+@bot.message_handler(commands=["steps"])
+def c_steps(m):
+    if not require_user(m.chat.id, m.from_user.id):
+        return
+    arg = (telebot.util.extract_arguments(m.text) or "").lower()
+    nums = re.findall(r"\d+", arg.replace("вчера", "").replace(" ", ""))
+    if not nums:
+        return bot.send_message(m.chat.id, "Формат: <code>/steps 8500</code> — за сегодня, "
+                                           "<code>/steps вчера 8500</code> — за вчера.")
+    day = today() - timedelta(days=1) if "вчера" in arg else today()
+    record_steps(m.chat.id, m.from_user.id, int(nums[0]), day)
+
+
+@bot.message_handler(commands=["water"])
+def c_water(m):
+    if not require_user(m.chat.id, m.from_user.id):
+        return
+    nums = re.findall(r"\d+", telebot.util.extract_arguments(m.text) or "")
+    ml = int(nums[0]) if nums else 250
+    if ml < 20:  # ввели литры: /water 1
+        ml *= 1000
+    record_water(m.chat.id, m.from_user.id, min(ml, 3000))
+
+
+@bot.callback_query_handler(func=lambda c: c.data.split(":")[0] in ("st", "wt"))
+def steps_water_buttons(c):
+    uid, chat = c.from_user.id, c.message.chat.id
+    kind, val = c.data.split(":", 1)
+    if not store.get_user(uid):
+        return bot.answer_callback_query(c.id, "Нажми /start", show_alert=True)
+    if kind == "st":
+        bot.answer_callback_query(c.id, "👣 Записал")
+        record_steps(chat, uid, int(val), today() - timedelta(days=1))
+    else:
+        bot.answer_callback_query(c.id, "💧")
+        record_water(chat, uid, int(val))
 
 
 # ======================= AI-рецепты =======================

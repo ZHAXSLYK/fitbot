@@ -45,6 +45,10 @@ CREATE TABLE IF NOT EXISTS lifts(
     user_id INTEGER, day TEXT, exercise TEXT, weight REAL, reps TEXT
 );
 CREATE INDEX IF NOT EXISTS lifts_user_ex ON lifts(user_id, exercise);
+CREATE TABLE IF NOT EXISTS daily(
+    user_id INTEGER, day TEXT, steps INTEGER, water INTEGER DEFAULT 0,
+    PRIMARY KEY(user_id, day)
+);
 CREATE TABLE IF NOT EXISTS pending_meals(
     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, data TEXT, created TEXT
 );
@@ -174,6 +178,31 @@ def pop_pending(user_id, pid):
         return None
     _exec("DELETE FROM pending_meals WHERE id=?", (pid,))
     return json.loads(rows[0]["data"])
+
+
+# ---------- шаги и вода ----------
+
+def set_steps(user_id, day, steps):
+    _exec("INSERT INTO daily(user_id, day, steps) VALUES(?,?,?) "
+          "ON CONFLICT(user_id, day) DO UPDATE SET steps=excluded.steps", (user_id, day, steps))
+
+
+def add_water(user_id, day, ml):
+    _exec("INSERT INTO daily(user_id, day, water) VALUES(?,?,?) "
+          "ON CONFLICT(user_id, day) DO UPDATE SET water=MAX(0, COALESCE(water,0)+excluded.water)",
+          (user_id, day, ml))
+
+
+def get_daily(user_id, day):
+    rows = _all("SELECT steps, water FROM daily WHERE user_id=? AND day=?", (user_id, day))
+    return {"steps": rows[0]["steps"], "water": rows[0]["water"] or 0} if rows else {"steps": None, "water": 0}
+
+
+def daily_avgs(user_id, since, until):
+    r = _all("SELECT AVG(steps) AS s, COUNT(steps) AS sn, AVG(NULLIF(water,0)) AS w, COUNT(NULLIF(water,0)) AS wn "
+             "FROM daily WHERE user_id=? AND day>=? AND day<=?", (user_id, since, until))[0]
+    return {"steps": int(r["s"]) if r["s"] else None, "steps_days": r["sn"],
+            "water": int(r["w"]) if r["w"] else None, "water_days": r["wn"]}
 
 
 # ---------- рабочие веса ----------
