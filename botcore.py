@@ -69,6 +69,9 @@ COMMANDS = [
     ("week", "Итоги недели"),
     ("steps", "Шаги за сегодня: /steps 8500"),
     ("water", "Вода: /water 500 (мл)"),
+    ("waist", "Талия: /waist 92 (см)"),
+    ("photo", "Фото прогресса (до/после)"),
+    ("compare", "Сравнить фото до/после"),
     ("norm", "Моя норма КБЖУ"),
     ("ask", "Вопрос AI-тренеру"),
     ("remind", "Утренний план: /remind 7 или off"),
@@ -248,9 +251,16 @@ def morning_text(u):
         yesterday = (f"📒 Вчера: {y['kcal']} из {u['kcal']} ккал, белок {y['protein']} из {u['protein']} г"
                      f"{' ✅' if y['kcal'] <= u['kcal'] * 1.05 else ' — перебор, сегодня без перекусов сверх меню'}.\n\n")
     weekly = ""
-    if wd == 0:  # понедельник — итоги прошлой недели
+    if wd == 0:  # понедельник — итоги прошлой недели + замеры
         start = today() - timedelta(days=7)
         weekly = week_report(u, start, start + timedelta(days=6), "прошлой недели") + "\n\n"
+        weekly += ("📏 <b>Понедельник — день замеров.</b> Утром натощак обхват талии на уровне пупка, "
+                   "сантиметр не затягивать: пришли <code>/waist 92</code>.\n")
+        photos = store.body_photos(u["user_id"])
+        if not photos or (today() - datetime.fromisoformat(photos[-1]["day"]).date()).days >= 13:
+            weekly += ("📸 И пора <b>фото прогресса</b>: тот же ракурс, свет и одежда, что в прошлый раз — "
+                       "нажми /photo и пришли снимок.\n")
+        weekly += "\n"
     return (
         f"☀️ Доброе утро, {html.escape(u.get('name') or 'чемпион')}!\n\n" + weekly + yesterday +
         "1. Взвесься натощак и пришли число сюда.\n"
@@ -513,7 +523,13 @@ def show_progress(chat, uid):
             logging.exception("chart send failed")
     elif len(rows) < 3:
         lines.append("\n📈 График веса появится после 3 взвешиваний.")
-    bot.send_message(chat, "\n".join(lines), reply_markup=ikb([[("📊 Итоги недели", "wk:7")]]))
+    ws = store.get_waists(uid)
+    if ws:
+        a, b = ws[0][1], ws[-1][1]
+        lines.insert(-1, f"\n📏 Талия: {a:g} → {b:g} см ({b - a:+g})" if len(ws) > 1 else f"\n📏 Талия: {b:g} см")
+    bot.send_message(chat, "\n".join(lines), reply_markup=ikb([
+        [("📊 Итоги недели", "wk:7"), ("📏 Талия", "bd:waist")],
+        [("📸 Фото прогресса", "bd:photo"), ("🔍 До / после", "bd:compare")]]))
 
 
 # ======================= команды =======================
@@ -744,6 +760,12 @@ def week_report(u, start, end, title):
             grown.append(f"{ex} {before['weight']:g}→{h['last']['weight']:g}")
     if grown:
         lines.append("💪 Рост весов: " + "; ".join(grown[:5]))
+    wk_w = store.get_waists(uid, since=s)
+    wk_w = [x for x in wk_w if x[0] <= e]
+    if wk_w:
+        before = store.last_waist_before(uid, s)
+        cm = wk_w[-1][1]
+        lines.append(f"📏 Талия: {before[1]:g} → {cm:g} см ({cm - before[1]:+g})" if before else f"📏 Талия: {cm:g} см")
     da = store.daily_avgs(uid, s, e)
     if da["steps"]:
         lines.append(f"👣 Шаги: в среднем {da['steps']:,} в день".replace(",", " ") + f" (отмечено дней: {da['steps_days']})")
@@ -948,6 +970,10 @@ def on_photo(m):
     uid, chat = m.from_user.id, m.chat.id
     if not require_user(chat, uid):
         return
+    state, _ = store.get_state(uid)
+    if state == "wait_body_photo":
+        store.clear_state(uid)
+        return save_body_photo(chat, uid, m.photo[-1].file_id)
     store.clear_state(uid)
     if not coach.enabled():
         return bot.send_message(chat, NO_AI_FOOD)
@@ -1060,6 +1086,116 @@ def steps_water_buttons(c):
         record_water(chat, uid, int(val))
 
 
+# ======================= талия и фото прогресса =======================
+
+def record_waist(chat, uid, cm):
+    d = today().isoformat()
+    prev = store.last_waist_before(uid, d)
+    store.add_waist(uid, d, cm)
+    msg = f"📏 Записал талию: <b>{cm:g} см</b>."
+    if prev:
+        diff = cm - prev[1]
+        msg += f"\nВ прошлый раз ({prev[0][8:10]}.{prev[0][5:7]}): {prev[1]:g} см → {diff:+g} см"
+        if diff < 0:
+            msg += " 🔥 Жир уходит!"
+        elif diff == 0:
+            msg += ". Держим курс — талия меняется медленнее веса."
+        else:
+            msg += ". Бывает из-за воды и соли — смотри на тренд за 2–3 недели."
+    else:
+        msg += "\nЭто точка старта. Меряй раз в неделю, в понедельник утром натощак."
+    bot.send_message(chat, msg)
+
+
+def save_body_photo(chat, uid, file_id):
+    u = store.get_user(uid)
+    d = today().isoformat()
+    ws = store.get_waists(uid)
+    rows = store.get_weights(uid, 1)
+    kg = rows[-1][1] if rows else u["weight"]
+    store.add_body_photo(uid, d, file_id, kg, ws[-1][1] if ws else None)
+    n = len(store.body_photos(uid))
+    extra = ("\nЧерез 2 недели напомню сделать следующее — тогда сравним «до / после»." if n == 1
+             else "\nСравнить с первым: /compare")
+    bot.send_message(chat, f"📸 Фото прогресса №{n} сохранено ({kg:.1f} кг).{extra}\n\n"
+                           "🔒 Фото хранятся только в этом чате Telegram, бот запоминает лишь ссылку на них.")
+
+
+def ask_body_photo(chat, uid):
+    store.set_state(uid, "wait_body_photo")
+    bot.send_message(chat, "📸 Пришли фото прогресса.\n\nСоветы, чтобы сравнение было честным:\n"
+                           "• утро, натощак, одинаковый свет и место;\n• одинаковая одежда (или без футболки);\n"
+                           "• анфас и бок, телефон на уровне груди.\n\n"
+                           "Это фото не пойдёт в дневник питания.")
+
+
+def show_compare(chat, uid):
+    ph = store.body_photos(uid)
+    if len(ph) < 2:
+        return bot.send_message(chat, "Для сравнения нужно минимум 2 фото прогресса. "
+                                      "Сделай первое сейчас (/photo), следующее — через 2 недели.")
+    first, last = ph[0], ph[-1]
+
+    def cap(p, label):
+        w = f", талия {p['waist']:g} см" if p.get("waist") else ""
+        return f"{label}: {p['day'][8:10]}.{p['day'][5:7]} — {p['weight']:.1f} кг{w}"
+
+    try:
+        bot.send_media_group(chat, [types.InputMediaPhoto(first["file_id"], caption=cap(first, "До")),
+                                    types.InputMediaPhoto(last["file_id"], caption=cap(last, "После"))])
+    except Exception:
+        logging.exception("compare send failed")
+        return bot.send_message(chat, "Не получилось показать фото, попробуй ещё раз.")
+    days = (datetime.fromisoformat(last["day"]) - datetime.fromisoformat(first["day"])).days
+    dk = last["weight"] - first["weight"]
+    msg = f"🔍 За {days} дн.: вес {dk:+.1f} кг"
+    if first.get("waist") and last.get("waist"):
+        msg += f", талия {last['waist'] - first['waist']:+g} см"
+    bot.send_message(chat, msg + ". Сравнивай силуэт, а не цифры — так видно реальный прогресс 💪")
+
+
+@bot.message_handler(commands=["waist"])
+def c_waist(m):
+    if not require_user(m.chat.id, m.from_user.id):
+        return
+    v = parse_num((telebot.util.extract_arguments(m.text) or "").replace("см", ""))
+    if v and 40 <= v <= 200:
+        store.clear_state(m.from_user.id)
+        return record_waist(m.chat.id, m.from_user.id, v)
+    store.set_state(m.from_user.id, "wait_waist")
+    bot.send_message(m.chat.id, "📏 Обхват талии на уровне пупка, утром натощак, сантиметр не затягивая. "
+                                "Пришли число, например 92")
+
+
+@bot.message_handler(commands=["photo"])
+def c_photo(m):
+    if require_user(m.chat.id, m.from_user.id):
+        ask_body_photo(m.chat.id, m.from_user.id)
+
+
+@bot.message_handler(commands=["compare"])
+def c_compare(m):
+    store.clear_state(m.from_user.id)
+    if require_user(m.chat.id, m.from_user.id):
+        show_compare(m.chat.id, m.from_user.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("bd:"))
+def body_buttons(c):
+    uid, chat = c.from_user.id, c.message.chat.id
+    bot.answer_callback_query(c.id)
+    if not store.get_user(uid):
+        return
+    val = c.data.split(":", 1)[1]
+    if val == "waist":
+        store.set_state(uid, "wait_waist")
+        bot.send_message(chat, "📏 Пришли обхват талии в см (на уровне пупка, утром натощак), например 92")
+    elif val == "photo":
+        ask_body_photo(chat, uid)
+    elif val == "compare":
+        show_compare(chat, uid)
+
+
 # ======================= AI-рецепты =======================
 
 AI_CATS = {"breakfast": "завтрак", "main": "обед или ужин", "snack": "перекус или десерт"}
@@ -1153,6 +1289,14 @@ def on_text(m):
         return save_weight(chat, uid, kg)
     if state == "wait_lift":
         return lift_input(chat, uid, text, data)
+    if state == "wait_waist":
+        v = parse_num(text.replace("см", ""))
+        if not v or not 40 <= v <= 200:
+            return bot.send_message(chat, "Пришли обхват талии в сантиметрах, например 92 или 91.5")
+        store.clear_state(uid)
+        return record_waist(chat, uid, v)
+    if state == "wait_body_photo":
+        return bot.send_message(chat, "Жду именно фото 📸 — пришли снимок, или нажми любую кнопку меню для отмены.")
     if state == "wait_eat":
         store.clear_state(uid)
         return log_food_text(chat, uid, text)

@@ -45,6 +45,12 @@ CREATE TABLE IF NOT EXISTS lifts(
     user_id INTEGER, day TEXT, exercise TEXT, weight REAL, reps TEXT
 );
 CREATE INDEX IF NOT EXISTS lifts_user_ex ON lifts(user_id, exercise);
+CREATE TABLE IF NOT EXISTS waist(
+    user_id INTEGER, day TEXT, cm REAL, PRIMARY KEY(user_id, day)
+);
+CREATE TABLE IF NOT EXISTS body_photos(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, day TEXT, file_id TEXT, weight REAL, waist REAL
+);
 CREATE TABLE IF NOT EXISTS daily(
     user_id INTEGER, day TEXT, steps INTEGER, water INTEGER DEFAULT 0,
     PRIMARY KEY(user_id, day)
@@ -178,6 +184,35 @@ def pop_pending(user_id, pid):
         return None
     _exec("DELETE FROM pending_meals WHERE id=?", (pid,))
     return json.loads(rows[0]["data"])
+
+
+# ---------- талия и фото прогресса ----------
+
+def add_waist(user_id, day, cm):
+    _exec("INSERT INTO waist(user_id, day, cm) VALUES(?,?,?) "
+          "ON CONFLICT(user_id, day) DO UPDATE SET cm=excluded.cm", (user_id, day, cm))
+
+
+def get_waists(user_id, since=None):
+    sql, args = "SELECT day, cm FROM waist WHERE user_id=?", [user_id]
+    if since:
+        sql += " AND day>=?"
+        args.append(since)
+    return [(r["day"], r["cm"]) for r in _all(sql + " ORDER BY day", args)]
+
+
+def last_waist_before(user_id, day):
+    rows = _all("SELECT day, cm FROM waist WHERE user_id=? AND day<? ORDER BY day DESC LIMIT 1", (user_id, day))
+    return (rows[0]["day"], rows[0]["cm"]) if rows else None
+
+
+def add_body_photo(user_id, day, file_id, weight, waist_cm):
+    _exec("INSERT INTO body_photos(user_id, day, file_id, weight, waist) VALUES(?,?,?,?,?)",
+          (user_id, day, file_id, weight, waist_cm))
+
+
+def body_photos(user_id):
+    return [dict(r) for r in _all("SELECT * FROM body_photos WHERE user_id=? ORDER BY day, id", (user_id,))]
 
 
 # ---------- шаги и вода ----------
