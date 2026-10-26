@@ -34,17 +34,34 @@ try:
                                 "messages": [{"role": "user", "content": "Скажи «ок»"}]})
         ok = show(r)
     elif gem:
-        models = [m.strip() for m in os.getenv("GEMINI_MODEL", "gemini-flash-latest,gemini-flash-lite-latest").split(",")]
+        models = [m.strip() for m in os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest,gemini-flash-latest").split(",")]
         ok = False
+        r = None
         for model in models:
             print(f"Используется Gemini, модель {model}. Проверяю…")
-            r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                              headers={"x-goog-api-key": gem}, timeout=40,
-                              json={"contents": [{"role": "user", "parts": [{"text": "Скажи «ок»"}]}]})
+            try:
+                r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                                  headers={"x-goog-api-key": gem}, timeout=25,
+                                  json={"contents": [{"role": "user", "parts": [{"text": "Скажи «ок»"}]}]})
+            except requests.exceptions.Timeout:
+                print("Не ответила за 25 сек — пробую запасную…\n")
+                continue
             ok = show(r)
             if ok or r.status_code not in (429, 500, 503):
                 break
             print("Модель занята — пробую запасную…\n")
+        if not ok and groq:
+            print("Gemini не ответил — проверяю запасной Groq…")
+            r = requests.post("https://api.groq.com/openai/v1/chat/completions", timeout=25,
+                              headers={"Authorization": f"Bearer {groq}"},
+                              json={"model": os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+                                    "messages": [{"role": "user", "content": "Скажи «ок»"}]})
+            ok = show(r)
+        if not ok and not groq:
+            print("\n💡 Совет: добавь запасной бесплатный AI — Groq (console.groq.com → API Keys),"
+                  " затем python3.12 set_key.py → 2. Когда Google перегружен, ответит Groq.")
+        if r is None:
+            r = type("R", (), {"status_code": 0})()
         if r.status_code == 404:
             print("\nМодель не найдена. Доступные модели Flash для твоего ключа:")
             lst = requests.get("https://generativelanguage.googleapis.com/v1beta/models",

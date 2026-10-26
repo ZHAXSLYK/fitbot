@@ -24,16 +24,17 @@ SYSTEM = """Ты — персональный фитнес-тренер и ну�
 - Поддерживай, но честно: если план клиента плохой — скажи прямо и предложи лучше."""
 
 TIMEOUT = 45
+MODEL_TIMEOUT = 25  # если модель не ответила за 25 с — переходим к запасной
 
 
-def _post(url, attempts=3, **kw):
+def _post(url, attempts=3, timeout=TIMEOUT, **kw):
     """POST с повтором: прокси PythonAnywhere иногда отвечает 503, у Google бывают 500/503."""
     import time
 
     last = None
     for attempt in range(attempts):
         try:
-            r = requests.post(url, timeout=TIMEOUT, **kw)
+            r = requests.post(url, timeout=timeout, **kw)
             if r.status_code in (500, 502, 503, 504) and attempt < attempts - 1:
                 time.sleep(2)
                 continue
@@ -48,14 +49,26 @@ def _post(url, attempts=3, **kw):
     raise last
 
 
+def providers():
+    """Все подключённые AI по приоритету: если первый не ответил — пробуем следующий."""
+    order = [("claude", "ANTHROPIC_API_KEY"), ("gemini", "GEMINI_API_KEY"), ("groq", "GROQ_API_KEY")]
+    return [name for name, key in order if os.getenv(key)]
+
+
 def provider():
-    if os.getenv("ANTHROPIC_API_KEY"):
-        return "claude"
-    if os.getenv("GEMINI_API_KEY"):
-        return "gemini"
-    if os.getenv("GROQ_API_KEY"):
-        return "groq"
-    return None
+    p = providers()
+    return p[0] if p else None
+
+
+def _with_fallback(calls):
+    """calls: {provider: функция без аргументов}. Возвращает первый удачный ответ."""
+    last = None
+    for p in providers():
+        try:
+            return calls[p]()
+        except Exception as e:  # noqa: BLE001 — любой сбой → следующий AI
+            last = e
+    raise last or RuntimeError("no_ai")
 
 
 def enabled():
@@ -72,7 +85,7 @@ def _system_for(user):
 
 # Если основная модель перегружена (503/429) — пробуем следующую
 GEMINI_MODELS = [m.strip() for m in os.getenv(
-    "GEMINI_MODEL", "gemini-flash-latest,gemini-flash-lite-latest").split(",") if m.strip()]
+    "GEMINI_MODEL", "gemini-flash-lite-latest,gemini-flash-latest").split(",") if m.strip()]
 
 
 def _gemini_call(body):
@@ -84,12 +97,15 @@ def _gemini_call(body):
                 headers={"x-goog-api-key": os.environ["GEMINI_API_KEY"]},
                 json=body,
                 attempts=2,
+                timeout=MODEL_TIMEOUT,
             )
             return "".join(p.get("text", "") for p in r.json()["candidates"][0]["content"]["parts"])
         except requests.exceptions.HTTPError as e:
             last = e
             if getattr(e.response, "status_code", None) not in (404, 429, 500, 503):
                 raise
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, KeyError) as e:
+            last = e  # зависла или вернула пустой ответ — пробуем следующую модель
     raise last
 
 
@@ -111,6 +127,7 @@ def _groq(system, question):
             "max_tokens": 1500,
             "temperature": 0.6,
         },
+        timeout=MODEL_TIMEOUT,
     )
     return r.json()["choices"][0]["message"]["content"]
 
@@ -161,6 +178,7 @@ def _groq_food(text, image_b64):
             "temperature": 0.2,
             "max_tokens": 1500,
         },
+        timeout=MODEL_TIMEOUT,
     )
     return r.json()["choices"][0]["message"]["content"]
 
@@ -205,27 +223,26 @@ def analyze_food(text="", image_bytes=None):
     """Фото и/или описание еды → {"items": [...], "comment": "..."}."""
     import base64
 
-    p = provider()
-    if not p:
+    if not provider():
         raise RuntimeError("no_ai")
     prompt = FOOD_PROMPT + (f"\n\nОписание от человека: {text}" if text else "")
     b64 = base64.b64encode(image_bytes).decode() if image_bytes else None
-    if p == "gemini":
-        parts = [{"text": prompt}]
-        if b64:
-            parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64}})
-        raw = _gemini_food(parts)
-    elif p == "groq":
-        raw = _groq_food(prompt, b64)
-    else:
-        raw = _claude_food(prompt, b64)
+    parts = [{"text": prompt}] + ([{"inline_data": {"mime_type": "image/jpeg", "data": b64}}] if b64 else [])
+    raw = _with_fallback({
+        "gemini": lambda: _gemini_food(parts),
+        "groq": lambda: _groq_food(prompt, b64),
+        "claude": lambda: _claude_food(prompt, b64),
+    })
     return _parse_food_json(raw)
 
 
 def ask(question, user):
-    p = provider()
-    if not p:
+    if not provider():
         return "AI-тренер выключен. Добавь в файл .env ключ GEMINI_API_KEY (бесплатно, см. README)."
-    fn = {"gemini": _gemini, "groq": _groq, "claude": _claude}[p]
-    text = fn(_system_for(user), question).strip()
+    system = _system_for(user)
+    text = _with_fallback({
+        "gemini": lambda: _gemini(system, question),
+        "groq": lambda: _groq(system, question),
+        "claude": lambda: _claude(system, question),
+    }).strip()
     return text.replace("**", "").replace("##", "") or "Не смог ответить, попробуй переформулировать."
