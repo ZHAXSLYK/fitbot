@@ -17,8 +17,12 @@ name = NAMES.get(choice)
 if not name:
     sys.exit("Нужно 1, 2 или 3")
 key = input("Вставь ключ и нажми Enter: ").strip()
-if len(key) < 20:
-    sys.exit("Ключ слишком короткий — скопируй его целиком и запусти снова")
+if len(key) < 20 or " " in key or key.startswith("python"):
+    sys.exit("✖ Это не похоже на ключ (вставилось что-то другое). Скопируй ключ ещё раз и запусти снова.")
+if name == "GROQ_API_KEY" and not key.startswith("gsk_"):
+    sys.exit("✖ Ключ Groq должен начинаться с gsk_ — скопируй его ещё раз и запусти снова.")
+if name == "ANTHROPIC_API_KEY" and not key.startswith("sk-ant-"):
+    sys.exit("✖ Ключ Claude должен начинаться с sk-ant- — скопируй его ещё раз и запусти снова.")
 
 lines = [l for l in open(ENV, encoding="utf-8").read().splitlines() if not l.startswith(name + "=")]
 lines.append(f"{name}={key}")  # остальные ключи сохраняются — они станут запасными
