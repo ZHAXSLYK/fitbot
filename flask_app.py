@@ -16,11 +16,10 @@ def index():
     return "Фитнес-бот работает ✅"
 
 
-@app.get(f"/tick/{SECRET or 'not-configured'}")
+@app.get("/tick")
 def tick():
-    """Раз в час дёргает cron-job.org — бот рассылает напоминания вовремя."""
-    if not SECRET:
-        abort(403)
+    """Раз в час дёргает cron-job.org — бот рассылает напоминания вовремя.
+    Секрет не нужен: повторный вызов ничего не дублирует (каждое напоминание — раз в день)."""
     from botcore import tick as run_tick
     return f"ok, sent {run_tick()}"
 
