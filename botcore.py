@@ -33,6 +33,7 @@ from data import (  # noqa: E402
     BY_NUM,
     CARDIO_NOTE,
     COOK_DAYS,
+    DEFAULT_TRAIN_DAYS,
     PROGRAMS,
     PROGRESSION_NOTE,
     RECIPE_CATS,
@@ -59,6 +60,8 @@ BTN_DIARY = "🍽 Дневник"
 
 COMMANDS = [
     ("workout", "Тренировка на сегодня"),
+    ("days", "Дни зала: /days пн ср пт"),
+    ("foto", "Напоминания о фото еды: /foto on или off"),
     ("menu", "Меню на сегодня"),
     ("recipe", "ПП-рецепты для Термомикса"),
     ("diary", "Дневник питания за сегодня"),
@@ -123,9 +126,85 @@ def norm_text(u):
     )
 
 
-def next_workout(u, done):
-    prog = PROGRAMS.get(u["days"], PROGRAMS[3])
-    return prog[done % len(prog)]
+WD_NAMES = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+
+
+def train_days(u):
+    """Дни зала (0 = пн). По умолчанию для 3 р/нед — пн, ср, пт."""
+    raw = (u.get("train_days") or "").strip()
+    if raw:
+        return [int(x) for x in raw.split(",") if x.strip().isdigit()]
+    return DEFAULT_TRAIN_DAYS.get(u["days"], DEFAULT_TRAIN_DAYS[3])
+
+
+def program(u):
+    return PROGRAMS.get(u["days"], PROGRAMS[3])
+
+
+def next_workout(u, _done=None):
+    """Следующая по кругу после последней сделанной (пропуск не сбивает порядок)."""
+    prog = program(u)
+    _, last = store.last_workout(u["user_id"])
+    keys = [w["key"] for w in prog]
+    return prog[(keys.index(last) + 1) % len(prog)] if last in keys else prog[0]
+
+
+def ex_parts(ex):
+    """(название, схема, стартовый ориентир, техника) — старые упражнения без двух последних полей."""
+    name, sch, *rest = ex
+    return name, sch, (rest[0] if rest else ""), (rest[1] if len(rest) > 1 else "")
+
+
+def week_start(d):
+    return d - timedelta(days=d.weekday())
+
+
+def streak_weeks(u):
+    """Сколько недель подряд выполнен план по тренировкам (текущая неделя — если уже выполнена)."""
+    uid, need = u["user_id"], len(train_days(u))
+    ws = week_start(today())
+    n = 0
+    if store.workouts_between(uid, ws.isoformat(), today().isoformat()) >= need:
+        n = 1
+    for i in range(1, 53):
+        s = ws - timedelta(weeks=i)
+        if store.workouts_between(uid, s.isoformat(), (s + timedelta(days=6)).isoformat()) >= need:
+            n += 1
+        else:
+            break
+    return n
+
+
+def motivation(u):
+    """Мотивация по реальным цифрам, а не общими словами."""
+    uid = u["user_id"]
+    lines = []
+    st = streak_weeks(u)
+    if st >= 2:
+        lines.append(f"🔥 {st} недели подряд без пропусков — не прерывай серию!" if st < 5
+                     else f"🔥 {st} недель подряд без пропусков — это уже привычка!")
+    ws = store.get_weights(uid, limit=400)
+    if len(ws) >= 2 and ws[0][1] - ws[-1][1] >= 0.5:
+        lines.append(f"⚖️ С начала: −{ws[0][1] - ws[-1][1]:.1f} кг ({ws[0][1]:g} → {ws[-1][1]:g}).")
+    wa = store.get_waists(uid)
+    if len(wa) >= 2 and wa[0][1] - wa[-1][1] >= 0.5:
+        lines.append(f"📏 Талия: −{wa[0][1] - wa[-1][1]:g} см с первого замера.")
+    month = store.lift_history(uid, since=(today() - timedelta(days=30)).isoformat())
+    allh = store.lift_history(uid)
+    ups = []
+    for name, h in month.items():
+        first = allh[name]["first"]["weight"]
+        if h["last"]["weight"] > first > 0:
+            ups.append(f"{name.lower()} {first:g}→{h['last']['weight']:g} кг")
+    if ups:
+        lines.append("💪 Рост весов: " + ", ".join(ups[:3]) + ".")
+    if not lines:
+        lines.append(random.choice([
+            "Результат делают не идеальные тренировки, а те, что не пропущены.",
+            "3 тренировки в неделю 3 месяца подряд — и тебя не узнают. Главное — не пропускать.",
+            "Сегодняшняя тренировка — это минус в талии через месяц.",
+        ]))
+    return "\n".join(lines)
 
 
 def scheme_info(scheme):
@@ -165,16 +244,21 @@ def lift_advice(name, scheme, last):
 
 
 def workout_text(w, uid=None):
-    lines = [f"🏋️ <b>{w['title']}</b>\n",
-             "Разминка: 5–7 мин дорожка + 2 лёгких подхода первого упражнения.\n"]
-    for i, (n, sch) in enumerate(w["exercises"], 1):
+    lines = [f"🏋️ <b>{w['title']}</b> · ~90 мин\n",
+             "Разминка: " + w.get("warmup", "5–7 мин дорожка + 2 лёгких подхода первого упражнения.") + "\n"]
+    for i, ex in enumerate(w["exercises"], 1):
+        n, sch, start, _ = ex_parts(ex)
         lines.append(f"{i}. <b>{n}</b> — {sch}")
         last = store.last_lift(uid, n) if uid else None
         if last:
             lines.append(f"    ↳ прошлый раз: {fmt_lift(last, scheme_info(sch)['secs'])} → {lift_advice(n, sch, last)}")
+        elif start:
+            lines.append(f"    ↳ ориентир: {start}")
+    if w.get("finisher"):
+        lines += ["", w["finisher"]]
     lines += ["", PROGRESSION_NOTE, "", CARDIO_NOTE]
     if uid:
-        lines.append("\n📝 Нажми «Записать веса» — запомню результаты и подскажу, когда добавлять вес.")
+        lines.append("\n▶️ Жми «Начать тренировку» — поведу по упражнениям по одному, с весами и техникой.")
     return "\n".join(lines)
 
 
@@ -236,13 +320,19 @@ def shopping_text():
     return "\n".join(parts)
 
 
+def missed_yesterday(u):
+    y = today() - timedelta(days=1)
+    return y.weekday() in train_days(u) and y.isoformat() not in store.workout_days(u["user_id"], y.isoformat())
+
+
 def morning_text(u):
     wd = today().weekday()
-    w = next_workout(u, store.workouts_count(u["user_id"]))
-    if u["days"] == 4:
-        train = f"Следующая тренировка: <b>{w['title']}</b> (жми 🏋️)."
-    elif WEEK_MENU[wd]["gym"]:
-        train = f"Сегодня зал — <b>{w['title']}</b> (жми 🏋️)."
+    w = next_workout(u)
+    if wd in train_days(u):
+        train = f"Сегодня зал — <b>{w['title']}</b>. В зале жми 🏋️ → «▶️ Начать тренировку»."
+    elif missed_yesterday(u):
+        train = (f"Вчера зал пропущен — не страшно, сделай <b>{w['title']}</b> сегодня. "
+                 "Порядок сохранится, план недели не сломается.")
     else:
         train = "Сегодня отдых от зала — 8–10 тыс. шагов."
     y = store.day_totals(u["user_id"], (today() - timedelta(days=1)).isoformat())
@@ -348,7 +438,7 @@ def onb_buttons(c):
         data["activity"] = calc.ACTIVITY[int(val)][1]
         store.set_state(uid, "days", data)
         bot.send_message(chat, "Сколько раз в неделю ходишь в зал?",
-                         reply_markup=ikb([[("3 раза — фулбади", "days:3"), ("4 раза — верх/низ", "days:4")]]))
+                         reply_markup=ikb([[("3 раза — сплит пн/ср/пт", "days:3"), ("4 раза — верх/низ", "days:4")]]))
     elif kind == "days":
         finish_onboarding(chat, c.from_user, data, int(val))
 
@@ -397,13 +487,26 @@ def finish_onboarding(chat, user, d, days):
 
 # ======================= тренировки =======================
 
-def show_workout(chat, uid):
+def workout_kb(u, w):
+    others = [(f"🔀 {o['title'].split('·')[-1].strip()[:20]}", f"wsel:{o['key']}")
+              for o in program(u) if o["key"] != w["key"]]
+    return ikb([[("▶️ Начать тренировку", f"lg:{w['key']}")],
+                others,
+                [("✅ Уже сделал (без записи весов)", f"done:{w['key']}")]])
+
+
+def show_workout(chat, uid, key=None):
     u = require_user(chat, uid)
     if u:
-        w = next_workout(u, store.workouts_count(uid))
-        bot.send_message(chat, workout_text(w, uid),
-                         reply_markup=ikb([[("📝 Записать веса", f"lg:{w['key']}"),
-                                            ("✅ Сделана", f"done:{w['key']}")]]))
+        w = (find_workout(key) if key else None) or next_workout(u)
+        send(chat, workout_text(w, uid), reply_markup=workout_kb(u, w))
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("wsel:"))
+def workout_select(c):
+    bot.answer_callback_query(c.id)
+    _drop_kb(c)
+    show_workout(c.message.chat.id, c.from_user.id, c.data.split(":")[1])
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("done:"))
@@ -420,8 +523,8 @@ def workout_done(c):
     bot.answer_callback_query(c.id, "💪")
     bot.send_message(
         chat,
-        f"✅ Записал! На этой неделе: {week} из {u['days']}. Всего тренировок: {total}.\n"
-        f"Следующая — <b>{next_workout(u, total)['title']}</b>.\n\n"
+        f"✅ Записал! На этой неделе: {week} из {len(train_days(u))}. Всего тренировок: {total}.\n"
+        f"Следующая — <b>{next_workout(u)['title']}</b>.\n\n{motivation(u)}\n\n"
         "Сейчас — белок + углеводы: протеиновый смузи, рецепт №16.",
         reply_markup=ikb([[("🥤 Рецепт смузи", "r:16")]]),
     )
@@ -491,7 +594,7 @@ def show_progress(chat, uid):
     rows = store.get_weights(uid)
     tr = calc.trend(rows, d)
     week = store.workouts_count(uid, since=(d - timedelta(days=d.weekday())).isoformat())
-    lines = ["📊 <b>Прогресс</b>\n", f"Тренировок на этой неделе: {week} из {u['days']}"]
+    lines = ["📊 <b>Прогресс</b>\n", f"Тренировок на этой неделе: {week} из {len(train_days(u))}"]
     if rows:
         start = rows[0][0]
         lines.append(f"Старт: {rows[0][1]:.1f} кг ({start[8:10]}.{start[5:7]}) → сейчас: {rows[-1][1]:.1f} кг")
@@ -647,15 +750,24 @@ def find_workout(key):
 
 def ask_lift(chat, uid, data):
     w = find_workout(data["key"])
-    name, sch = w["exercises"][data["idx"]]
+    name, sch, start, tip = ex_parts(w["exercises"][data["idx"]])
     last = store.last_lift(uid, name)
-    lines = [f"📝 {data['idx'] + 1}/{len(w['exercises'])} <b>{name}</b> — {sch}"]
+    lines = []
+    if data["idx"] == 0 and w.get("warmup"):
+        lines.append(f"🔥 <b>Разминка:</b> {w['warmup']}\n")
+    lines.append(f"🏋️ {data['idx'] + 1}/{len(w['exercises'])} <b>{name}</b> — {sch}")
     if last:
         lines.append(f"Прошлый раз ({last['day'][8:10]}.{last['day'][5:7]}): {fmt_lift(last, scheme_info(sch)['secs'])}")
+    elif start:
+        lines.append(f"Ориентир: {start}")
     lines.append(lift_advice(name, sch, last))
-    lines.append("\n" + LIFT_HELP)
+    if tip:
+        lines.append(f"🎯 Техника: {tip}")
+    lines.append("\nСделай все подходы, потом пришли результат: " + LIFT_HELP.split(": ", 1)[1])
     store.set_state(uid, "wait_lift", data)
-    bot.send_message(chat, "\n".join(lines), reply_markup=ikb([[("⏭ Пропустить", "lgs:skip"), ("🏁 Закончить", "lgs:end")]]))
+    row = [("⏭ Пропустить", "lgs:skip"), ("🏁 Закончить", "lgs:end")]
+    rows = [[("🔁 Как в прошлый раз", "lgs:same")], row] if last else [row]
+    bot.send_message(chat, "\n".join(lines), reply_markup=ikb(rows))
 
 
 def finish_lifts(chat, uid, data):
@@ -668,13 +780,16 @@ def finish_lifts(chat, uid, data):
     if not store.workout_logged(uid, d.isoformat(), data["key"]):
         store.log_workout(uid, d.isoformat(), data["key"])
     week = store.workouts_count(uid, since=(d - timedelta(days=d.weekday())).isoformat())
-    nxt = next_workout(u, store.workouts_count(uid))
+    nxt = next_workout(u)
+    w = find_workout(data["key"])
     rec = f"\n🏆 Рекорды: {', '.join(data['records'])}" if data.get("records") else ""
+    fin = f"\n\nОсталось последнее:\n{w['finisher']}" if w.get("finisher") and not data.get("ended") else ""
     bot.send_message(
         chat,
-        f"🏁 <b>Тренировка записана!</b> Упражнений: {data['logged']}, тоннаж: {int(data.get('volume', 0))} кг{rec}\n"
-        f"На этой неделе: {week} из {u['days']}. Следующая — <b>{nxt['title']}</b>.\n\n"
-        "Сейчас — белок + углеводы: протеиновый смузи, рецепт №16.",
+        f"🏁 <b>Силовая записана!</b> Упражнений: {data['logged']}, тоннаж: {int(data.get('volume', 0))} кг{rec}\n"
+        f"На этой неделе: {week} из {len(train_days(u))}. Следующая — <b>{nxt['title']}</b>.{fin}\n\n"
+        f"{motivation(u)}\n\n"
+        "После зала — белок + углеводы: протеиновый смузи, рецепт №16.",
         reply_markup=ikb([[("🥤 Рецепт смузи", "r:16")]]),
     )
 
@@ -699,7 +814,7 @@ def lift_input(chat, uid, text, data):
     reps = [int(float(x)) for x in nums[1:9]]
     if not (0 <= w <= 500 and all(0 < r <= 300 for r in reps)):
         return bot.send_message(chat, "Проверь числа: вес 0–500 кг, повторы 1–300.")
-    name, sch = find_workout(data["key"])["exercises"][data["idx"]]
+    name, sch, _, _ = ex_parts(find_workout(data["key"])["exercises"][data["idx"]])
     prev = store.lift_history(uid).get(name)
     best = max(prev["first"]["weight"], prev["last"]["weight"]) if prev else None
     store.add_lift(uid, today().isoformat(), name, w, reps)
@@ -731,7 +846,14 @@ def lift_buttons(c):
     _drop_kb(c)
     if val == "skip":
         next_lift(chat, uid, data)
+    elif val == "same":
+        name, *_ = ex_parts(find_workout(data["key"])["exercises"][data["idx"]])
+        last = store.last_lift(uid, name)
+        if not last:
+            return ask_lift(chat, uid, data)
+        lift_input(chat, uid, " ".join([f"{last['weight']:g}"] + [str(r) for r in last["reps"]]), data)
     else:
+        data["ended"] = True
         finish_lifts(chat, uid, data)
 
 
@@ -742,7 +864,8 @@ def week_report(u, start, end, title):
     s, e = start.isoformat(), end.isoformat()
     lines = [f"📊 <b>Итоги {title}</b> ({s[8:10]}.{s[5:7]}–{e[8:10]}.{e[5:7]})"]
     wk = store.workouts_between(uid, s, e)
-    lines.append(f"🏋️ Тренировок: {wk} из {u['days']}" + (" ✅" if wk >= u["days"] else ""))
+    need = len(train_days(u))
+    lines.append(f"🏋️ Тренировок: {wk} из {need}" + (" ✅" if wk >= need else ""))
     rows = store.get_weights(uid, 120)
     cur, _ = calc._avg(rows, start, end)
     prev, _ = calc._avg(rows, start - timedelta(days=7), start - timedelta(days=1))
@@ -776,7 +899,7 @@ def week_report(u, start, end, title):
     if da["steps"] and da["steps"] < 7000:
         tips.append("шагов мало — цель 8–10 тыс. в день, это главный жиросжигатель вне зала")
     if wk < u["days"]:
-        tips.append(f"добери тренировки: цель {u['days']} в неделю")
+        tips.append(f"добери тренировки: цель {len(train_days(u))} в неделю")
     if days and avg > u["kcal"] * 1.08:
         tips.append("калорий больше нормы — убери перекусы вне меню")
     if days and days < 4:
@@ -1241,6 +1364,119 @@ def ai_recipe(c):
                                        "fat": k[2], "carbs": k[3]}, datetime.now(TZ).isoformat())
         buttons.insert(0, ("🍽 Съел порцию", f"ms:{pid}"))
     send(chat, "✨ " + text, parse_mode=None, reply_markup=ikb([buttons]))
+
+
+# ======================= дни зала и напоминания =======================
+
+@bot.message_handler(commands=["days"])
+def c_days(m):
+    u = require_user(m.chat.id, m.from_user.id)
+    if not u:
+        return
+    words = re.findall(r"[а-яё]{2}", (m.text or "").lower())
+    days = sorted({WD_NAMES.index(w) for w in words if w in WD_NAMES})
+    if not days:
+        cur = " ".join(WD_NAMES[d] for d in train_days(u))
+        return bot.send_message(m.chat.id, f"Сейчас дни зала: <b>{cur}</b>.\n"
+                                "Поменять: <code>/days пн ср пт</code> (через пробел).")
+    store.save_user(u["user_id"], train_days=",".join(map(str, days)))
+    bot.send_message(m.chat.id, "✔ Дни зала: <b>" + " ".join(WD_NAMES[d] for d in days) +
+                     "</b>. Накануне вечером напомню, в день тренировки — утром.")
+
+
+EVENING_HOUR = int(os.getenv("EVENING_HOUR", "20"))   # напоминание накануне
+CHECK_HOUR = int(os.getenv("CHECK_HOUR", "13"))       # проверка «был ли в зале» в день тренировки
+
+
+def evening_text(u):
+    w = next_workout(u)
+    return (f"🌙 <b>Завтра зал</b> — {w['title']}.\n\n"
+            "• собери сумку с вечера (форма, полотенце, вода, шейкер);\n"
+            "• ляг спать до 23:00 — утром будет сила;\n"
+            "• утром за 1–1,5 ч до зала — лёгкий завтрак с белком.\n\n"
+            f"{motivation(u)}")
+
+
+def check_text(u):
+    w = next_workout(u)
+    return (f"🤔 Сегодня по плану был зал (<b>{w['title']}</b>), а тренировки не вижу.\n\n"
+            "Если был — нажми «Уже сделал» или «Начать тренировку», чтобы записать веса.\n"
+            "Если не получилось — ничего страшного: сходи завтра, порядок сохранится. "
+            "Главное — не две пропущенные подряд.")
+
+
+# Напоминания прислать фото еды: час проверки и «окно» приёма пищи по времени записи
+MEAL_CHECKS = {
+    "m_breakfast": (11, "05:00", "11:00", "завтрака"),
+    "m_lunch": (15, "11:00", "15:00", "обеда"),
+    "m_dinner": (21, "17:00", "21:00", "ужина"),
+}
+
+
+def meal_text(u, label):
+    t = store.day_totals(u["user_id"], today().isoformat())
+    left = f" Сегодня записано {t['kcal']} из {u['kcal']} ккал." if t["n"] else ""
+    return (f"📷 Не вижу {label}. Сфотографируй тарелку и пришли сюда — посчитаю КБЖУ и запишу.{left}\n"
+            "Уже съел без фото — напиши текстом, например «гречка 200 г, курица 150 г».\n"
+            "<i>Выключить эти напоминания: /foto off</i>")
+
+
+@bot.message_handler(commands=["foto"])
+def c_foto(m):
+    u = require_user(m.chat.id, m.from_user.id)
+    if not u:
+        return
+    off = "off" in (m.text or "").lower() or "выкл" in (m.text or "").lower()
+    store.save_user(u["user_id"], meal_remind=0 if off else 1)
+    bot.send_message(m.chat.id, "Напоминания о фото еды выключены. Включить: /foto on" if off else
+                     "✔ Буду напоминать прислать фото еды: в 11:00 (завтрак), 15:00 (обед) и 21:00 (ужин) — "
+                     "только если ты ещё ничего не прислал. Выключить: /foto off")
+
+
+def tick(now=None):
+    """Вызывается раз в час (cron-job.org → /tick/<секрет>). Шлёт напоминания вовремя и без повторов."""
+    now = now or datetime.now(TZ)
+    d, hour = now.date(), now.hour
+    sent = 0
+    for u in store.all_users():
+        uid, day = u["user_id"], d.isoformat()
+        rh = 8 if u.get("remind_hour") is None else u["remind_hour"]
+        if rh < 0:  # /remind off — молчим
+            continue
+        days = train_days(u)
+        msgs = []
+        if rh <= hour < rh + 4 and u.get("last_remind") != day:
+            msgs.append(("morning", morning_text(u), morning_kb(d.weekday())))
+            store.save_user(uid, last_remind=day)
+        if (hour >= EVENING_HOUR and (d.weekday() + 1) % 7 in days
+                and not store.notice_sent(uid, day, "evening")):
+            store.mark_notice(uid, day, "evening")
+            msgs.append(("evening", evening_text(u), None))
+        if (CHECK_HOUR <= hour < EVENING_HOUR and d.weekday() in days
+                and day not in store.workout_days(uid, day)
+                and not store.notice_sent(uid, day, "check")):
+            store.mark_notice(uid, day, "check")
+            w = next_workout(u)
+            msgs.append(("check", check_text(u), workout_kb(u, w)))
+        if u.get("meal_remind", 1) != 0:
+            for kind, (h, lo, hi, label) in MEAL_CHECKS.items():
+                if (hour == h and not store.notice_sent(uid, day, kind)
+                        and not any(lo <= m["time"][:5] < hi for m in store.meals_for_day(uid, day))):
+                    store.mark_notice(uid, day, kind)
+                    msgs.append((kind, meal_text(u, label), None))
+        if (hour == 19 and d.weekday() in (0, 3) and not store.notice_sent(uid, day, "body")):
+            photos = store.body_photos(uid)
+            if not photos or (d - datetime.fromisoformat(photos[-1]["day"]).date()).days >= 13:
+                store.mark_notice(uid, day, "body")
+                msgs.append(("body", "📸 Пора <b>фото прогресса</b> (раз в 2 недели): тот же ракурс, свет и одежда. "
+                             "Нажми /photo и пришли снимок — потом сравним «до/после» через /compare.", None))
+        for kind, text, kb in msgs:
+            try:
+                bot.send_message(uid, text, reply_markup=kb)
+                sent += 1
+            except Exception as e:
+                logging.warning("tick %s %s failed: %s", kind, uid, e)
+    return sent
 
 
 # ======================= любой текст =======================

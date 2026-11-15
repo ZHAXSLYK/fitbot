@@ -55,6 +55,9 @@ CREATE TABLE IF NOT EXISTS daily(
     user_id INTEGER, day TEXT, steps INTEGER, water INTEGER DEFAULT 0,
     PRIMARY KEY(user_id, day)
 );
+CREATE TABLE IF NOT EXISTS notices(
+    user_id INTEGER, day TEXT, kind TEXT, PRIMARY KEY(user_id, day, kind)
+);
 CREATE TABLE IF NOT EXISTS pending_meals(
     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, data TEXT, created TEXT
 );
@@ -77,9 +80,34 @@ def _all(sql, args=()):
         return c.execute(sql, args).fetchall()
 
 
+MIGRATIONS = [
+    "ALTER TABLE users ADD COLUMN train_days TEXT",   # дни зала: "0,2,4" (0 = пн)
+    "ALTER TABLE users ADD COLUMN meal_remind INTEGER DEFAULT 1",  # напоминать прислать фото еды
+]
+
+
 def init():
     with closing(_conn()) as c, c:
         c.executescript(SCHEMA)
+        for sql in MIGRATIONS:
+            try:
+                c.execute(sql)
+            except sqlite3.OperationalError:
+                pass  # колонка уже есть
+
+
+def all_users():
+    return [dict(r) for r in _all("SELECT * FROM users WHERE kcal IS NOT NULL")]
+
+
+# ---------- напоминания (чтобы не слать одно и то же дважды) ----------
+
+def notice_sent(user_id, day, kind):
+    return bool(_all("SELECT 1 FROM notices WHERE user_id=? AND day=? AND kind=?", (user_id, day, kind)))
+
+
+def mark_notice(user_id, day, kind):
+    _exec("INSERT OR IGNORE INTO notices(user_id, day, kind) VALUES(?,?,?)", (user_id, day, kind))
 
 
 # ---------- users ----------
@@ -272,6 +300,17 @@ def lift_history(user_id, since=None):
         e["last"] = dict(r)
         e["n"] += 1
     return out
+
+
+def last_workout(user_id):
+    rows = _all("SELECT day, workout FROM workouts WHERE user_id=? ORDER BY day DESC, rowid DESC LIMIT 1",
+                (user_id,))
+    return (rows[0]["day"], rows[0]["workout"]) if rows else (None, None)
+
+
+def workout_days(user_id, since):
+    return {r["day"] for r in _all("SELECT DISTINCT day FROM workouts WHERE user_id=? AND day>=?",
+                                   (user_id, since))}
 
 
 def workout_logged(user_id, day, key):
