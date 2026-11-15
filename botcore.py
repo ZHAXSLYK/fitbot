@@ -1388,13 +1388,77 @@ EVENING_HOUR = int(os.getenv("EVENING_HOUR", "20"))   # напоминание �
 CHECK_HOUR = int(os.getenv("CHECK_HOUR", "13"))       # проверка «был ли в зале» в день тренировки
 
 
-def evening_text(u):
-    w = next_workout(u)
-    return (f"🌙 <b>Завтра зал</b> — {w['title']}.\n\n"
-            "• собери сумку с вечера (форма, полотенце, вода, шейкер);\n"
-            "• ляг спать до 23:00 — утром будет сила;\n"
-            "• утром за 1–1,5 ч до зала — лёгкий завтрак с белком.\n\n"
-            f"{motivation(u)}")
+FREEZER_KEYS = ("филе", "фарш", "говядин", "хек", "минтай")
+
+
+def tomorrow_food(d):
+    """Меню на завтра + что сделать сегодня вечером (разморозить, проверить продукты)."""
+    wd = (d.weekday() + 1) % 7
+    menu = WEEK_MENU[wd]
+    lines = [f"🍽 <b>Завтра ({menu['day'].lower()}) едим:</b>"]
+    lines += [f"• {meal}: {name} (№{num})" for meal, name, num in menu["meals"]]
+    nums = [num for _, _, num in menu["meals"]]
+    cook = COOK_DAYS.get(wd, [])
+    if cook:
+        lines.append("\n🔪 <b>Завтра день заготовок:</b> " + ", ".join(f"№{n} {BY_NUM[n]['title']}" for n in cook))
+        thaw = [i for n in cook for i in BY_NUM[n]["ingredients"] if any(k in i.lower() for k in FREEZER_KEYS)]
+        if thaw:
+            lines.append("❄️ <b>Если мясо в морозилке — переложи сегодня в холодильник:</b>\n" + "\n".join(f"• {i}" for i in thaw))
+        lines.append("Проверь, всё ли есть для заготовок, — кнопки рецептов ниже.")
+        nums += [n for n in cook if n not in nums]
+    if wd == 5:
+        lines.append("\n🛒 <b>Завтра закупка на неделю</b> — утром пришлю список.")
+    return "\n".join(lines), list(dict.fromkeys(nums))
+
+
+def evening_text(u, d=None):
+    d = d or today()
+    food, nums = tomorrow_food(d)
+    parts = []
+    if (d.weekday() + 1) % 7 in train_days(u):
+        w = next_workout(u)
+        parts.append(f"🏋️ <b>Завтра зал</b> — {w['title']}.\n"
+                     "• собери сумку с вечера (форма, полотенце, вода, шейкер);\n"
+                     "• ляг спать до 23:00 — утром будет сила;\n"
+                     "• за 1–1,5 ч до зала — лёгкий завтрак с белком.")
+    parts.append(food)
+    parts.append(motivation(u))
+    btns = [(f"№{n} {BY_NUM[n]['title'][:22]}", f"r:{n}") for n in nums]
+    kb = ikb([btns[i:i + 2] for i in range(0, len(btns), 2)])
+    return "🌙 <b>План на завтра</b>\n\n" + "\n\n".join(parts), kb
+
+
+MEAL_SUGGEST = {  # час: (название приёма в меню, с какого времени записанная еда считается этим приёмом)
+    12: ("Обед", "11:00"),
+    18: ("Ужин", "16:30"),
+}
+
+
+def suggest_text(u, d, label):
+    """Предложение, что съесть сейчас, с учётом уже съеденного за день."""
+    item = next(((name, num) for meal, name, num in WEEK_MENU[d.weekday()]["meals"] if meal == label), None)
+    if not item:
+        return None
+    name, num = item
+    r = BY_NUM[num]
+    k = parse_kbju(r["kbju"])
+    t = store.day_totals(u["user_id"], d.isoformat())
+    left_k, left_p = u["kcal"] - t["kcal"], u["protein"] - t["protein"]
+    lines = [f"🍽 <b>{label}:</b> по меню — {name} (№{num}), {r['kbju'].split('(')[0].strip()}."]
+    if t["n"]:
+        lines.append(f"Сегодня уже {t['kcal']} ккал, осталось {max(left_k, 0)} ккал и {max(left_p, 0)} г белка.")
+        if k and k[0] > left_k:
+            lines.append("⚠️ Порция больше остатка — возьми половину гарнира, мясо/рыбу оставь полностью.")
+        elif left_p > 60:
+            lines.append("💪 Белка не хватает — добавь к блюду творог, яйцо или порцию мяса.")
+    lines.append("Нет этого блюда? Жми «✨ Другое» — придумаю из того, что обычно есть.")
+    btns = [("📖 Рецепт", f"r:{num}"), ("🍽 Съел", f"ate:{num}")]
+    return "\n".join(lines), ikb([btns, [("✨ Другое", "airec:main")]])
+
+
+def shopping_msg():
+    return ("🛒 <b>Суббота — закупка на неделю.</b> Список под меню; завтра первая готовка.\n\n"
+            + shopping_text().split("\n", 1)[1].lstrip("\n"))
 
 
 def check_text(u):
@@ -1448,10 +1512,21 @@ def tick(now=None):
         if rh <= hour < rh + 4 and u.get("last_remind") != day:
             msgs.append(("morning", morning_text(u), morning_kb(d.weekday())))
             store.save_user(uid, last_remind=day)
-        if (hour >= EVENING_HOUR and (d.weekday() + 1) % 7 in days
-                and not store.notice_sent(uid, day, "evening")):
+        if hour >= EVENING_HOUR and not store.notice_sent(uid, day, "evening"):
             store.mark_notice(uid, day, "evening")
-            msgs.append(("evening", evening_text(u), None))
+            msgs.append(("evening", *evening_text(u, d)))
+        food_on = u.get("meal_remind", 1) != 0
+        for h, (label, since) in MEAL_SUGGEST.items():
+            kind = "s_" + label
+            if (food_on and h <= hour < h + 2 and not store.notice_sent(uid, day, kind)
+                    and not any(m["time"][:5] >= since for m in store.meals_for_day(uid, day))):
+                store.mark_notice(uid, day, kind)
+                s = suggest_text(u, d, label)
+                if s:
+                    msgs.append((kind, *s))
+        if food_on and d.weekday() == 5 and 10 <= hour < 13 and not store.notice_sent(uid, day, "shop"):
+            store.mark_notice(uid, day, "shop")
+            msgs.append(("shop", shopping_msg(), None))
         if (CHECK_HOUR <= hour < EVENING_HOUR and d.weekday() in days
                 and day not in store.workout_days(uid, day)
                 and not store.notice_sent(uid, day, "check")):
