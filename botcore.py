@@ -61,7 +61,7 @@ BTN_DIARY = "🍽 Дневник"
 COMMANDS = [
     ("workout", "Тренировка на сегодня"),
     ("days", "Дни зала: /days пн ср пт"),
-    ("foto", "Напоминания весь день: /foto on или off"),
+    ("foto", "Напоминания о фото еды: /foto on или off"),
     ("menu", "Меню на сегодня"),
     ("recipe", "ПП-рецепты для Термомикса"),
     ("diary", "Дневник питания за сегодня"),
@@ -1428,77 +1428,9 @@ def c_foto(m):
         return
     off = "off" in (m.text or "").lower() or "выкл" in (m.text or "").lower()
     store.save_user(u["user_id"], meal_remind=0 if off else 1)
-    bot.send_message(m.chat.id, "Напоминания в течение дня выключены (утренний план остаётся). Включить: /foto on"
-                     if off else
-                     "✔ Режим «полный контакт» включён. Напоминаю только о том, что ещё не прислано:\n"
-                     "10:00 — вес · 11:00 — фото завтрака · 13:00 и 18:00 — вода · 15:00 — фото обеда · "
-                     "21:00 — фото ужина · 22:00 — итог дня с оценкой.\n"
-                     "Плюс: зал накануне в 20:00, проверка в день зала в 13:00, талия по понедельникам, "
-                     "фото тела раз в 2 недели. Выключить: /foto off")
-
-
-WATER_KB = [[("💧 +250 мл", "wt:250"), ("💧 +500 мл", "wt:500")]]
-
-
-def day_summary_text(u, d):
-    """Итог дня в 22:00: что сделано, что нет, что поправить завтра."""
-    uid, day = u["user_id"], d.isoformat()
-    t = store.day_totals(uid, day)
-    dl = store.get_daily(uid, day)
-    goal = water_goal(u)
-    w_today = any(x == day for x, _ in store.get_weights(uid, limit=3))
-    gym_day = d.weekday() in train_days(u)
-    gym_done = day in store.workout_days(uid, day)
-    ok = lambda b: "✅" if b else "❌"  # noqa: E731
-    lines = ["🌙 <b>Итог дня</b>\n",
-             f"{ok(w_today)} Вес" + ("" if w_today else " — завтра утром натощак, сразу пришли число"),
-             f"{ok(t['n'] >= 3)} Еда: записано {t['n']} приём(а), {t['kcal']} из {u['kcal']} ккал",
-             f"{ok(t['protein'] >= u['protein'] * 0.85)} Белок: {t['protein']} из {u['protein']} г",
-             f"{ok(dl['water'] >= goal * 0.8)} Вода: {dl['water'] / 1000:g} из {goal / 1000:g} л"]
-    if gym_day:
-        lines.append(f"{ok(gym_done)} Зал" + ("" if gym_done else " — сходи завтра, порядок сохранится"))
-    score = sum([w_today, t["n"] >= 3, t["protein"] >= u["protein"] * 0.85, dl["water"] >= goal * 0.8]
-                + ([gym_done] if gym_day else []))
-    total = 5 if gym_day else 4
-    lines.append(f"\nОценка дня: <b>{score} из {total}</b>. " + (
-        "Идеальный день! 🔥" if score == total else
-        "Хорошо, завтра добей остальное." if score >= total - 2 else
-        "Завтра начнём заново — главное, присылай всё сюда, я напомню."))
-    if t["n"] and t["kcal"] > u["kcal"] * 1.1:
-        lines.append("⚠️ Перебор по калориям — завтра без перекусов сверх меню.")
-    return "\n".join(lines)
-
-
-def contact_reminders(u, d, hour):
-    """«Полный контакт»: вес, вода, талия, итог дня — только то, что ещё не прислано."""
-    if u.get("meal_remind", 1) == 0:
-        return []
-    uid, day, out = u["user_id"], d.isoformat(), []
-
-    def once(kind, cond, text, kb=None):
-        if cond and not store.notice_sent(uid, day, kind):
-            store.mark_notice(uid, day, kind)
-            out.append((kind, text, ikb(kb) if kb else None))
-
-    if hour == 10:
-        once("weight", not any(x == day for x, _ in store.get_weights(uid, limit=3)),
-             "⚖️ Вес сегодня ещё не прислан. Взвесься (лучше утром натощак, после туалета) и просто "
-             "пришли число сюда, например <code>83.6</code>.")
-    goal = water_goal(u)
-    water = store.get_daily(uid, day)["water"]
-    if hour == 13:
-        once("water1", water < goal * 0.35,
-             f"💧 Вода: {water / 1000:g} из {goal / 1000:g} л. Выпей стакан сейчас и отметь кнопкой.", WATER_KB)
-    if hour == 18:
-        once("water2", water < goal * 0.7,
-             f"💧 К вечеру выпито {water / 1000:g} из {goal / 1000:g} л — догони до ужина.", WATER_KB)
-    if hour == 19 and d.weekday() == 0:
-        once("waist", not any(x == day for x, _ in store.get_waists(uid, since=day)),
-             "📏 Сегодня понедельник — день замера талии. Сантиметр на уровне пупка, не затягивать, "
-             "пришли: <code>/waist 92</code>")
-    if hour == 22:
-        once("summary", True, day_summary_text(u, d))
-    return out
+    bot.send_message(m.chat.id, "Напоминания о фото еды выключены. Включить: /foto on" if off else
+                     "✔ Буду напоминать прислать фото еды: в 11:00 (завтрак), 15:00 (обед) и 21:00 (ужин) — "
+                     "только если ты ещё ничего не прислал. Выключить: /foto off")
 
 
 def tick(now=None):
@@ -1532,7 +1464,6 @@ def tick(now=None):
                         and not any(lo <= m["time"][:5] < hi for m in store.meals_for_day(uid, day))):
                     store.mark_notice(uid, day, kind)
                     msgs.append((kind, meal_text(u, label), None))
-        msgs += contact_reminders(u, d, hour)
         if (hour == 19 and d.weekday() in (0, 3) and not store.notice_sent(uid, day, "body")):
             photos = store.body_photos(uid)
             if not photos or (d - datetime.fromisoformat(photos[-1]["day"]).date()).days >= 13:
