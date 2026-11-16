@@ -33,6 +33,8 @@ from data import (  # noqa: E402
     BY_NUM,
     COOK_DAYS,
     DEFAULT_TRAIN_DAYS,
+    EX_IMG,
+    FINISHER_IMG,
     PROGRAMS,
     RECIPE_CATS,
     RECIPES,
@@ -239,6 +241,43 @@ def lift_advice(name, scheme, last):
         return "📈 Все повторы сделаны — добавь отягощение (пояс/гантель) или +2 повтора"
     inc = 1 if "гантел" in name.lower() or w < 20 else 2.5
     return f"📈 Пора добавить вес: {w + inc:g} кг"
+
+
+IMG_BASE = os.getenv("IMG_BASE", "https://raw.githubusercontent.com/ZHAXSLYK/fitbot/main/img")
+
+
+def img_url(name=None, key=None):
+    k = key or EX_IMG.get(name)
+    return f"{IMG_BASE}/{k}.jpg" if k else None
+
+
+def send_with_photo(chat, text, url, reply_markup=None):
+    """Картинка с подписью; если подпись длинная или картинка не загрузилась — картинка и текст отдельно."""
+    if url:
+        try:
+            if len(text) <= 1000:
+                return bot.send_photo(chat, url, caption=text, reply_markup=reply_markup)
+            bot.send_photo(chat, url)
+        except Exception as e:
+            logging.warning("photo failed %s: %s", url, e)
+    return bot.send_message(chat, text, reply_markup=reply_markup)
+
+
+def send_workout_album(chat, w):
+    """Альбом: по картинке на упражнение + кардио, подпись — номер и название."""
+    media = []
+    for i, ex in enumerate(w["exercises"], 1):
+        url = img_url(ex[0])
+        if url:
+            media.append(types.InputMediaPhoto(url, caption=f"{i}. {ex[0]}"))
+    fk = FINISHER_IMG.get(w["key"])
+    if fk:
+        media.append(types.InputMediaPhoto(img_url(key=fk), caption="Кардио"))
+    if len(media) >= 2:
+        try:
+            bot.send_media_group(chat, media[:10])
+        except Exception as e:
+            logging.warning("album failed: %s", e)
 
 
 def human_scheme(sch):
@@ -515,6 +554,7 @@ def show_workout(chat, uid, key=None):
     u = require_user(chat, uid)
     if u:
         w = (find_workout(key) if key else None) or next_workout(u)
+        send_workout_album(chat, w)
         send(chat, workout_text(w, uid), reply_markup=workout_kb(u, w))
 
 
@@ -777,7 +817,7 @@ def ask_lift(chat, uid, data):
     last = store.last_lift(uid, ex[0])
     row = [("⏭ Пропустить", "lgs:skip"), ("🏁 Закончить", "lgs:end")]
     rows = [[("🔁 Как в прошлый раз", "lgs:same")], row] if last else [row]
-    bot.send_message(chat, "\n".join(lines), reply_markup=ikb(rows))
+    send_with_photo(chat, "\n".join(lines), img_url(ex[0]), reply_markup=ikb(rows))
 
 
 def finish_lifts(chat, uid, data):
@@ -794,6 +834,11 @@ def finish_lifts(chat, uid, data):
     w = find_workout(data["key"])
     rec = f"\n🏆 Рекорды: {', '.join(data['records'])}" if data.get("records") else ""
     fin = f"\n\nОсталось кардио:\n{w['finisher']}" if w.get("finisher") and not data.get("ended") else ""
+    if fin and FINISHER_IMG.get(w["key"]):
+        try:
+            bot.send_photo(chat, img_url(key=FINISHER_IMG[w["key"]]), caption=w["finisher"])
+        except Exception as e:
+            logging.warning("finisher photo failed: %s", e)
     bot.send_message(
         chat,
         f"🏁 <b>Силовая записана!</b> Упражнений: {data['logged']}, тоннаж: {int(data.get('volume', 0))} кг{rec}\n"
