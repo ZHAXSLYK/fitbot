@@ -891,9 +891,9 @@ def lift_buttons(c):
     if not store.get_user(uid):
         return
     if kind == "lg":
-        if not find_workout(val):
-            return
         _drop_kb(c)
+        if not find_workout(val):  # кнопка со старого сообщения (программа обновилась) — берём текущую тренировку
+            val = next_workout(store.get_user(uid))["key"]
         return ask_lift(chat, uid, {"key": val, "idx": 0, "logged": 0, "volume": 0})
     state, data = store.get_state(uid)
     if state != "wait_lift":
