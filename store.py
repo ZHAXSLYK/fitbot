@@ -58,6 +58,9 @@ CREATE TABLE IF NOT EXISTS daily(
 CREATE TABLE IF NOT EXISTS notices(
     user_id INTEGER, day TEXT, kind TEXT, PRIMARY KEY(user_id, day, kind)
 );
+CREATE TABLE IF NOT EXISTS family(
+    helper_id INTEGER PRIMARY KEY, owner_id INTEGER, name TEXT
+);
 CREATE TABLE IF NOT EXISTS pending_meals(
     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, data TEXT, created TEXT
 );
@@ -98,6 +101,27 @@ def init():
 
 def all_users():
     return [dict(r) for r in _all("SELECT * FROM users WHERE kcal IS NOT NULL")]
+
+
+# ---------- семья: помощник (жена) получает закупку и готовку ----------
+
+def add_helper(owner_id, helper_id, name):
+    _exec("INSERT INTO family(helper_id, owner_id, name) VALUES(?,?,?) "
+          "ON CONFLICT(helper_id) DO UPDATE SET owner_id=excluded.owner_id, name=excluded.name",
+          (helper_id, owner_id, name))
+
+
+def owner_of(helper_id):
+    rows = _all("SELECT owner_id FROM family WHERE helper_id=?", (helper_id,))
+    return rows[0]["owner_id"] if rows else None
+
+
+def helpers(owner_id):
+    return [dict(r) for r in _all("SELECT helper_id, name FROM family WHERE owner_id=?", (owner_id,))]
+
+
+def remove_helpers(owner_id):
+    _exec("DELETE FROM family WHERE owner_id=?", (owner_id,))
 
 
 # ---------- напоминания (чтобы не слать одно и то же дважды) ----------

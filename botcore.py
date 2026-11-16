@@ -57,11 +57,13 @@ BTN_PROGRESS = "📊 Прогресс"
 BTN_NORM = "🎯 Моя норма"
 BTN_ASK = "🤖 Спросить тренера"
 BTN_DIARY = "🍽 Дневник"
+BTN_TOMORROW = "🌙 Меню на завтра"
 
 COMMANDS = [
     ("workout", "Тренировка на сегодня"),
     ("days", "Дни зала: /days пн ср пт"),
     ("foto", "Напоминания о фото еды: /foto on или off"),
+    ("family", "Подключить жену к закупке и готовке"),
     ("menu", "Меню на сегодня"),
     ("recipe", "ПП-рецепты для Термомикса"),
     ("diary", "Дневник питания за сегодня"),
@@ -453,9 +455,73 @@ def begin_onboarding(chat_id, uid):
     )
 
 
+def helper_kb():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(BTN_DAY, BTN_TOMORROW)
+    kb.row(BTN_SHOP, BTN_RECIPE)
+    return kb
+
+
+HELPER_HELP = (
+    "Что я буду присылать:\n"
+    "• каждый вечер в 20:00 — меню на завтра; если завтра день заготовок — что приготовить и что разморозить;\n"
+    "• в дни заготовок (вс, ср, пт) в 9:00 — что готовим сегодня, с рецептами под Термомикс;\n"
+    "• в субботу в 10:00 — список покупок на неделю.\n\n"
+    "Кнопки внизу: меню на сегодня и на завтра, покупки, рецепты.")
+
+
+def start_helper(m, owner_id):
+    hid = m.from_user.id
+    owner = store.get_user(owner_id)
+    if not owner or not owner.get("kcal"):
+        return bot.send_message(m.chat.id, "Ссылка устарела — попроси прислать новую (команда /family).")
+    if hid == owner_id:
+        return bot.send_message(m.chat.id, "Это твоя же ссылка — её нужно отправить жене 🙂")
+    name = m.from_user.first_name or "Помощник"
+    store.add_helper(owner_id, hid, name)
+    bot.send_message(m.chat.id, f"Привет, {html.escape(name)}! 👋 Ты подключена как помощник "
+                     f"по питанию у {html.escape(owner.get('name') or 'мужа')}: закупка и готовка "
+                     "ПП-блюд на Термомиксе.\n\n" + HELPER_HELP, reply_markup=helper_kb())
+    bot.send_message(owner_id, f"👩‍🍳 {html.escape(name)} подключилась: теперь ей приходят меню на завтра, "
+                     "заготовки и список покупок. Когда купит или приготовит — я тебе напишу.")
+
+
+@bot.message_handler(commands=["family"])
+def c_family(m):
+    u = require_user(m.chat.id, m.from_user.id)
+    if not u:
+        return
+    if "off" in (m.text or "").lower():
+        store.remove_helpers(u["user_id"])
+        return bot.send_message(m.chat.id, "Помощники отключены — им больше ничего не приходит.")
+    link = f"https://t.me/{bot_username()}?start=fam{u['user_id']}"
+    hs = store.helpers(u["user_id"])
+    now = ("Сейчас подключены: " + ", ".join(html.escape(h["name"]) for h in hs) + ".\n\n") if hs else ""
+    bot.send_message(m.chat.id, f"👩‍🍳 <b>Подключить жену к закупке и готовке</b>\n\n{now}"
+                     "1. Перешли ей эту ссылку:\n" + link + "\n"
+                     "2. Она открывает ссылку в Telegram и нажимает <b>Запустить</b> (Start).\n"
+                     "3. Готово — ей будут приходить меню на завтра, заготовки и список покупок, "
+                     "а тебе — уведомление, когда она купит или приготовит.\n\n"
+                     "Отключить: <code>/family off</code>", disable_web_page_preview=True)
+
+
+_BOT_NAME = []
+
+
+def bot_username():
+    if not _BOT_NAME:
+        _BOT_NAME.append(os.getenv("BOT_USERNAME") or bot.get_me().username)
+    return _BOT_NAME[0]
+
+
 @bot.message_handler(commands=["start"])
 def cmd_start(m):
     store.clear_state(m.from_user.id)
+    arg = (m.text or "").split(maxsplit=1)[1:] or [""]
+    if arg[0].startswith("fam") and arg[0][3:].isdigit():
+        return start_helper(m, int(arg[0][3:]))
+    if store.owner_of(m.from_user.id) and not store.get_user(m.from_user.id):
+        return bot.send_message(m.chat.id, "С возвращением! 👩‍🍳\n\n" + HELPER_HELP, reply_markup=helper_kb())
     u = store.get_user(m.from_user.id)
     if u and u.get("kcal"):
         bot.send_message(m.chat.id, "С возвращением! 💪", reply_markup=menu_kb())
@@ -1394,7 +1460,7 @@ def ai_recipe(c):
     if val == "menu":
         return bot.send_message(chat, "Какой рецепт придумать?", reply_markup=ikb(
             [[("🌅 Завтрак", "airec:breakfast"), ("🍗 Обед/ужин", "airec:main"), ("🥤 Перекус", "airec:snack")]]))
-    u = require_user(chat, uid)
+    u = require_user(chat, store.owner_of(uid) or uid)
     if not u or val not in AI_CATS:
         return
     known = ", ".join(r["title"] for r in RECIPES if r["cat"] == val)
@@ -1460,7 +1526,8 @@ def tomorrow_food(d):
     cook = COOK_DAYS.get(wd, [])
     if cook:
         lines.append("\n🔪 <b>Завтра день заготовок:</b> " + ", ".join(f"№{n} {BY_NUM[n]['title']}" for n in cook))
-        thaw = [i for n in cook for i in BY_NUM[n]["ingredients"] if any(k in i.lower() for k in FREEZER_KEYS)]
+        thaw = [i for n in cook for i in BY_NUM[n]["ingredients"]
+                if any(k in i.lower() for k in FREEZER_KEYS) and "варён" not in i.lower()]
         if thaw:
             lines.append("❄️ <b>Если мясо в морозилке — переложи сегодня в холодильник:</b>\n" + "\n".join(f"• {i}" for i in thaw))
         lines.append("Проверь, всё ли есть для заготовок, — кнопки рецептов ниже.")
@@ -1513,6 +1580,59 @@ def suggest_text(u, d, label):
     lines.append("Нет этого блюда? Жми «✨ Другое» — придумаю из того, что обычно есть.")
     btns = [("📖 Рецепт", f"r:{num}"), ("🍽 Съел", f"ate:{num}")]
     return "\n".join(lines), ikb([btns, [("✨ Другое", "airec:main")]])
+
+
+def send_tomorrow(chat):
+    text, nums = tomorrow_food(today())
+    btns = [(f"№{n} {BY_NUM[n]['title'][:22]}", f"r:{n}") for n in nums]
+    bot.send_message(chat, text, reply_markup=ikb([btns[i:i + 2] for i in range(0, len(btns), 2)]))
+
+
+def helper_messages(owner, d, hour):
+    """Сообщения жене-помощнику: вечером меню на завтра, в день заготовок — что готовить, в субботу — покупки."""
+    out = []
+    day, wd = d.isoformat(), d.weekday()
+    for h in store.helpers(owner["user_id"]):
+        hid = h["helper_id"]
+
+        def once(kind, cond, text, kb=None):
+            if cond and not store.notice_sent(hid, day, kind):
+                store.mark_notice(hid, day, kind)
+                out.append((hid, kind, text, kb))
+
+        food, nums = tomorrow_food(d)
+        btns = [(f"№{n} {BY_NUM[n]['title'][:22]}", f"r:{n}") for n in nums]
+        once("h_evening", hour >= EVENING_HOUR, "🌙 <b>На завтра</b>\n\n" + food,
+             ikb([btns[i:i + 2] for i in range(0, len(btns), 2)]))
+        cook = COOK_DAYS.get(wd, [])
+        if cook:
+            lines = ["🔪 <b>Сегодня день заготовок</b> — готовим на 2–3 дня:"]
+            lines += [f"• №{n} {BY_NUM[n]['title']}" for n in cook]
+            lines.append("\nРецепты под Термомикс — кнопками ниже. Когда всё готово — нажми ✅.")
+            kb = [[(f"№{n} {BY_NUM[n]['title'][:30]}", f"r:{n}")] for n in cook]
+            kb.append([("✅ Приготовила", "fam:cooked")])
+            once("h_cook", 9 <= hour < 13, "\n".join(lines), ikb(kb))
+        once("h_shop", wd == 5 and 10 <= hour < 13,
+             "🛒 <b>Суббота — закупка на неделю.</b> Завтра первая готовка.\n\n"
+             + shopping_text().split("\n", 1)[1].lstrip("\n"),
+             ikb([[("✅ Всё купила", "fam:bought")]]))
+    return out
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("fam:"))
+def family_done(c):
+    owner_id = store.owner_of(c.from_user.id)
+    bot.answer_callback_query(c.id, "Спасибо! ❤️")
+    _drop_kb(c)
+    if not owner_id:
+        return
+    name = html.escape(c.from_user.first_name or "Жена")
+    what = {"bought": f"🛒 {name} купила продукты на неделю — завтра заготовки.",
+            "cooked": f"🍲 {name} приготовила заготовки — еда на ближайшие дни готова, держись меню 💪"}
+    msg = what.get(c.data.split(":")[1])
+    if msg:
+        bot.send_message(owner_id, msg)
+        bot.send_message(c.message.chat.id, "Передала мужу ✅")
 
 
 def shopping_msg():
@@ -1585,7 +1705,16 @@ def tick(now=None):
                     msgs.append((kind, *s))
         if food_on and d.weekday() == 5 and 10 <= hour < 13 and not store.notice_sent(uid, day, "shop"):
             store.mark_notice(uid, day, "shop")
-            msgs.append(("shop", shopping_msg(), None))
+            if store.helpers(uid):
+                msgs.append(("shop", "🛒 Список покупок на неделю отправил жене. Когда купит — напишу.", None))
+            else:
+                msgs.append(("shop", shopping_msg(), None))
+        for hid, kind, text, kb in helper_messages(u, d, hour):
+            try:
+                bot.send_message(hid, text, reply_markup=kb)
+                sent += 1
+            except Exception as e:
+                logging.warning("tick helper %s %s failed: %s", kind, hid, e)
         if (CHECK_HOUR <= hour < EVENING_HOUR and d.weekday() in days
                 and day not in store.workout_days(uid, day)
                 and not store.notice_sent(uid, day, "check")):
@@ -1624,6 +1753,7 @@ BUTTONS = {
     BTN_NORM: lambda c, u: c_norm_by_id(c, u),
     BTN_ASK: lambda c, u: ask_button(c, u),
     BTN_DIARY: lambda c, u: show_diary(c, u),
+    BTN_TOMORROW: lambda c, u: send_tomorrow(c),
 }
 
 
@@ -1651,6 +1781,9 @@ def on_text(m):
 
     if state in ("sex", "age", "height", "weight", "act", "days"):
         return onb_text(m, state, data)
+    if store.owner_of(uid) and not store.get_user(uid):
+        return bot.send_message(chat, "Я помогаю с закупкой и готовкой 👩‍🍳 Пользуйся кнопками внизу: "
+                                "меню на сегодня и на завтра, покупки, рецепты.", reply_markup=helper_kb())
     if state == "wait_weight":
         kg = parse_num(text)
         if not kg or not 35 <= kg <= 250:
