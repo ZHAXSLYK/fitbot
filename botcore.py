@@ -96,7 +96,7 @@ def menu_kb():
     kb.row(BTN_DIARY, BTN_RECIPE)
     kb.row(BTN_WEIGHT, BTN_PROGRESS)
     kb.row(BTN_SHOP, BTN_NORM)
-    kb.row(BTN_ASK)
+    kb.row(BTN_TOMORROW, BTN_ASK)
     return kb
 
 
@@ -455,13 +455,6 @@ def begin_onboarding(chat_id, uid):
     )
 
 
-def helper_kb():
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row(BTN_DAY, BTN_TOMORROW)
-    kb.row(BTN_SHOP, BTN_RECIPE)
-    return kb
-
-
 HELPER_HELP = (
     "Что я буду присылать:\n"
     "• каждый вечер в 20:00 — меню на завтра; если завтра день заготовок — что приготовить и что разморозить;\n"
@@ -479,10 +472,16 @@ def start_helper(m, owner_id):
         return bot.send_message(m.chat.id, "Это твоя же ссылка — её нужно отправить жене 🙂")
     name = m.from_user.first_name or "Помощник"
     store.add_helper(owner_id, hid, name)
-    bot.send_message(m.chat.id, f"Привет, {html.escape(name)}! 👋 Ты подключена как помощник "
-                     f"по питанию у {html.escape(owner.get('name') or 'мужа')}: закупка и готовка "
-                     "ПП-блюд на Термомиксе.\n\n" + HELPER_HELP, reply_markup=helper_kb())
-    bot.send_message(owner_id, f"👩‍🍳 {html.escape(name)} подключилась: теперь ей приходят меню на завтра, "
+    bot.send_message(m.chat.id, f"Привет, {html.escape(name)}! 👋 Ты подключена к семейному боту "
+                     f"{html.escape(owner.get('name') or 'мужа')}: общее меню, закупка и готовка ПП-блюд "
+                     "на Термомиксе.\n\n" + HELPER_HELP.replace("Кнопки внизу: меню на сегодня и на завтра, "
+                     "покупки, рецепты.", "А ещё всё остальное: своя норма калорий, тренировки, дневник питания "
+                     "по фото, вес и прогресс — как у мужа."))
+    if not (store.get_user(hid) or {}).get("kcal"):
+        begin_onboarding(m.chat.id, hid)
+    else:
+        bot.send_message(m.chat.id, "Твой профиль уже есть — меню внизу 👇", reply_markup=menu_kb())
+    bot.send_message(owner_id, f"👩‍🍳 {html.escape(name)} подключилась: у неё теперь полный бот со своей нормой, а ещё меню на завтра, "
                      "заготовки и список покупок. Когда купит или приготовит — я тебе напишу.")
 
 
@@ -520,8 +519,6 @@ def cmd_start(m):
     arg = (m.text or "").split(maxsplit=1)[1:] or [""]
     if arg[0].startswith("fam") and arg[0][3:].isdigit():
         return start_helper(m, int(arg[0][3:]))
-    if store.owner_of(m.from_user.id) and not store.get_user(m.from_user.id):
-        return bot.send_message(m.chat.id, "С возвращением! 👩‍🍳\n\n" + HELPER_HELP, reply_markup=helper_kb())
     u = store.get_user(m.from_user.id)
     if u and u.get("kcal"):
         bot.send_message(m.chat.id, "С возвращением! 💪", reply_markup=menu_kb())
@@ -1594,6 +1591,7 @@ def helper_messages(owner, d, hour):
     day, wd = d.isoformat(), d.weekday()
     for h in store.helpers(owner["user_id"]):
         hid = h["helper_id"]
+        full = bool((store.get_user(hid) or {}).get("kcal"))  # у жены свой профиль — вечерний план и покупки ей придут как пользователю
 
         def once(kind, cond, text, kb=None):
             if cond and not store.notice_sent(hid, day, kind):
@@ -1602,7 +1600,7 @@ def helper_messages(owner, d, hour):
 
         food, nums = tomorrow_food(d)
         btns = [(f"№{n} {BY_NUM[n]['title'][:22]}", f"r:{n}") for n in nums]
-        once("h_evening", hour >= EVENING_HOUR, "🌙 <b>На завтра</b>\n\n" + food,
+        once("h_evening", hour >= EVENING_HOUR and not full, "🌙 <b>На завтра</b>\n\n" + food,
              ikb([btns[i:i + 2] for i in range(0, len(btns), 2)]))
         cook = COOK_DAYS.get(wd, [])
         if cook:
@@ -1612,7 +1610,7 @@ def helper_messages(owner, d, hour):
             kb = [[(f"№{n} {BY_NUM[n]['title'][:30]}", f"r:{n}")] for n in cook]
             kb.append([("✅ Приготовила", "fam:cooked")])
             once("h_cook", 9 <= hour < 13, "\n".join(lines), ikb(kb))
-        once("h_shop", wd == 5 and 10 <= hour < 13,
+        once("h_shop", wd == 5 and 10 <= hour < 13 and not full,
              "🛒 <b>Суббота — закупка на неделю.</b> Завтра первая готовка.\n\n"
              + shopping_text().split("\n", 1)[1].lstrip("\n"),
              ikb([[("✅ Всё купила", "fam:bought")]]))
@@ -1706,7 +1704,8 @@ def tick(now=None):
         if food_on and d.weekday() == 5 and 10 <= hour < 13 and not store.notice_sent(uid, day, "shop"):
             store.mark_notice(uid, day, "shop")
             note = "\n\n👩‍🍳 Этот же список отправил жене — когда купит, напишу." if store.helpers(uid) else ""
-            msgs.append(("shop", shopping_msg() + note, None))
+            kb = ikb([[("✅ Всё купила", "fam:bought")]]) if store.owner_of(uid) else None
+            msgs.append(("shop", shopping_msg() + note, kb))
         for hid, kind, text, kb in helper_messages(u, d, hour):
             try:
                 bot.send_message(hid, text, reply_markup=kb)
@@ -1779,9 +1778,6 @@ def on_text(m):
 
     if state in ("sex", "age", "height", "weight", "act", "days"):
         return onb_text(m, state, data)
-    if store.owner_of(uid) and not store.get_user(uid):
-        return bot.send_message(chat, "Я помогаю с закупкой и готовкой 👩‍🍳 Пользуйся кнопками внизу: "
-                                "меню на сегодня и на завтра, покупки, рецепты.", reply_markup=helper_kb())
     if state == "wait_weight":
         kg = parse_num(text)
         if not kg or not 35 <= kg <= 250:
