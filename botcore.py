@@ -31,11 +31,9 @@ import coach  # noqa: E402
 import store  # noqa: E402
 from data import (  # noqa: E402
     BY_NUM,
-    CARDIO_NOTE,
     COOK_DAYS,
     DEFAULT_TRAIN_DAYS,
     PROGRAMS,
-    PROGRESSION_NOTE,
     RECIPE_CATS,
     RECIPES,
     SHOPPING,
@@ -243,22 +241,40 @@ def lift_advice(name, scheme, last):
     return f"📈 Пора добавить вес: {w + inc:g} кг"
 
 
+def human_scheme(sch):
+    """«4×8 · отдых 2 мин» → «4 подхода × 8 раз · отдых 2 мин»."""
+    def sub(m):
+        sets, reps, unit = m.group(1), m.group(2), (m.group(3) or "").strip()
+        word = "подхода" if sets in ("2", "3", "4") else "подходов"
+        return f"{sets} {word} × {reps} {'сек' if unit == 'сек' else 'раз'}"
+    return re.sub(r"(\d+)×(\d+(?:–\d+)?)(?:\s*(сек))?", sub, sch, count=1)
+
+
+def ex_block(i, ex, uid=None, total=None):
+    n, sch, weight, how = ex_parts(ex)
+    head = f"{i}/{total}" if total else f"{i}."
+    lines = [f"<b>{head} {n}</b>", f"   {human_scheme(sch)}"]
+    last = store.last_lift(uid, n) if uid else None
+    if last:
+        lines.append(f"   Прошлый раз: {fmt_lift(last, scheme_info(sch)['secs'])} → {lift_advice(n, sch, last)}")
+    elif weight:
+        lines.append(f"   Вес: {weight}")
+    if how:
+        lines.append(f"   Как: {how}")
+    return "\n".join(lines)
+
+
 def workout_text(w, uid=None):
-    lines = [f"🏋️ <b>{w['title']}</b> · ~90 мин\n",
-             "Разминка: " + w.get("warmup", "5–7 мин дорожка + 2 лёгких подхода первого упражнения.") + "\n"]
+    lines = [f"🏋️ <b>{w['title']}</b> · {w.get('time', '60–75 мин')}\n",
+             "🔥 Разминка: " + w.get("warmup", "5 мин эллипс + лёгкий подход первого упражнения.") + "\n"]
     for i, ex in enumerate(w["exercises"], 1):
-        n, sch, start, _ = ex_parts(ex)
-        lines.append(f"{i}. <b>{n}</b> — {sch}")
-        last = store.last_lift(uid, n) if uid else None
-        if last:
-            lines.append(f"    ↳ прошлый раз: {fmt_lift(last, scheme_info(sch)['secs'])} → {lift_advice(n, sch, last)}")
-        elif start:
-            lines.append(f"    ↳ ориентир: {start}")
+        lines.append(ex_block(i, ex, uid) + "\n")
     if w.get("finisher"):
-        lines += ["", w["finisher"]]
-    lines += ["", PROGRESSION_NOTE, "", CARDIO_NOTE]
+        lines.append(w["finisher"])
+    lines += ["", "📈 Сделал все повторы во всех подходах — в следующий раз +2,5 кг. "
+                  "Не получается нужное число — сбрось 5 кг."]
     if uid:
-        lines.append("\n▶️ Жми «Начать тренировку» — поведу по упражнениям по одному, с весами и техникой.")
+        lines.append("\n▶️ «Начать тренировку» — буду давать по одному упражнению и запоминать веса.")
     return "\n".join(lines)
 
 
@@ -438,7 +454,7 @@ def onb_buttons(c):
         data["activity"] = calc.ACTIVITY[int(val)][1]
         store.set_state(uid, "days", data)
         bot.send_message(chat, "Сколько раз в неделю ходишь в зал?",
-                         reply_markup=ikb([[("3 раза — сплит пн/ср/пт", "days:3"), ("4 раза — верх/низ", "days:4")]]))
+                         reply_markup=ikb([[("3 раза — всё тело пн/ср/пт", "days:3"), ("4 раза — верх/низ", "days:4")]]))
     elif kind == "days":
         finish_onboarding(chat, c.from_user, data, int(val))
 
@@ -750,21 +766,15 @@ def find_workout(key):
 
 def ask_lift(chat, uid, data):
     w = find_workout(data["key"])
-    name, sch, start, tip = ex_parts(w["exercises"][data["idx"]])
-    last = store.last_lift(uid, name)
+    ex = w["exercises"][data["idx"]]
     lines = []
     if data["idx"] == 0 and w.get("warmup"):
-        lines.append(f"🔥 <b>Разминка:</b> {w['warmup']}\n")
-    lines.append(f"🏋️ {data['idx'] + 1}/{len(w['exercises'])} <b>{name}</b> — {sch}")
-    if last:
-        lines.append(f"Прошлый раз ({last['day'][8:10]}.{last['day'][5:7]}): {fmt_lift(last, scheme_info(sch)['secs'])}")
-    elif start:
-        lines.append(f"Ориентир: {start}")
-    lines.append(lift_advice(name, sch, last))
-    if tip:
-        lines.append(f"🎯 Техника: {tip}")
-    lines.append("\nСделай все подходы, потом пришли результат: " + LIFT_HELP.split(": ", 1)[1])
+        lines.append(f"🔥 <b>Сначала разминка:</b> {w['warmup']}\n")
+    lines.append("🏋️ " + ex_block(data["idx"] + 1, ex, uid, total=len(w["exercises"])))
+    lines.append("\nСделай все подходы и пришли: вес и повторы через пробел, например <code>60 8 8 8 8</code>. "
+                 "Без веса — <code>0 12 12 12</code>.")
     store.set_state(uid, "wait_lift", data)
+    last = store.last_lift(uid, ex[0])
     row = [("⏭ Пропустить", "lgs:skip"), ("🏁 Закончить", "lgs:end")]
     rows = [[("🔁 Как в прошлый раз", "lgs:same")], row] if last else [row]
     bot.send_message(chat, "\n".join(lines), reply_markup=ikb(rows))
@@ -783,7 +793,7 @@ def finish_lifts(chat, uid, data):
     nxt = next_workout(u)
     w = find_workout(data["key"])
     rec = f"\n🏆 Рекорды: {', '.join(data['records'])}" if data.get("records") else ""
-    fin = f"\n\nОсталось последнее:\n{w['finisher']}" if w.get("finisher") and not data.get("ended") else ""
+    fin = f"\n\nОсталось кардио:\n{w['finisher']}" if w.get("finisher") and not data.get("ended") else ""
     bot.send_message(
         chat,
         f"🏁 <b>Силовая записана!</b> Упражнений: {data['logged']}, тоннаж: {int(data.get('volume', 0))} кг{rec}\n"
