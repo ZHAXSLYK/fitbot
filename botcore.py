@@ -1705,10 +1705,8 @@ def tick(now=None):
                     msgs.append((kind, *s))
         if food_on and d.weekday() == 5 and 10 <= hour < 13 and not store.notice_sent(uid, day, "shop"):
             store.mark_notice(uid, day, "shop")
-            if store.helpers(uid):
-                msgs.append(("shop", "🛒 Список покупок на неделю отправил жене. Когда купит — напишу.", None))
-            else:
-                msgs.append(("shop", shopping_msg(), None))
+            note = "\n\n👩‍🍳 Этот же список отправил жене — когда купит, напишу." if store.helpers(uid) else ""
+            msgs.append(("shop", shopping_msg() + note, None))
         for hid, kind, text, kb in helper_messages(u, d, hour):
             try:
                 bot.send_message(hid, text, reply_markup=kb)
