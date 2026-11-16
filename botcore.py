@@ -853,6 +853,10 @@ def lift_buttons(c):
     state, data = store.get_state(uid)
     if state != "wait_lift":
         return bot.send_message(chat, "Запись весов уже закончена.")
+    if not find_workout(data.get("key")):
+        store.clear_state(uid)
+        _drop_kb(c)
+        return bot.send_message(chat, "Программа обновилась — нажми 🏋️ Тренировка и «▶️ Начать тренировку».")
     _drop_kb(c)
     if val == "skip":
         next_lift(chat, uid, data)
@@ -1609,6 +1613,9 @@ def on_text(m):
         store.clear_state(uid)
         return save_weight(chat, uid, kg)
     if state == "wait_lift":
+        if not find_workout(data.get("key")):
+            store.clear_state(uid)
+            return bot.send_message(chat, "Программа обновилась — нажми 🏋️ Тренировка и «▶️ Начать тренировку».")
         return lift_input(chat, uid, text, data)
     if state == "wait_waist":
         v = parse_num(text.replace("см", ""))
