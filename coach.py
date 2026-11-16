@@ -25,15 +25,27 @@ SYSTEM = """Ты — персональный фитнес-тренер и ну�
 - Не преувеличивай и не выдумывай. Твои рецепты — новые, придуманные сейчас, а не «проверенные»;
   КБЖУ в них примерное (±10–15%), так и говори.
 
+Разговор:
+- Ниже — последние сообщения диалога: продолжай разговор, понимай «её», «это», «как подключить» из контекста.
+- Не здоровайся заново и не проси прислать вес, если об этом не спрашивают.
+- Если спрашивают, как что-то сделать в боте, — дай точные шаги: какую кнопку нажать или какую команду отправить.
+- Если такой функции в боте нет — так и скажи честно, не придумывай обходные пути.
+
 Что умеет бот (подсказывай, когда к месту, других функций не придумывай):
-- 🍲 Рецепт: 20 готовых ПП-рецептов для Термомикса + «✨ Новый рецепт от AI» без ограничений;
-- 📅 Меню дня и 🛒 Покупки: меню на неделю и список продуктов под него;
-- 🍽 Дневник: фото еды в чат → бот считает КБЖУ и записывает; /eat текстом; кнопки воды;
 - 🏋️ Тренировка: всё тело пн/ср/пт, дни A / B / C по 6 базовых упражнений + 10 мин кардио, 60–75 мин;
-  «▶️ Начать тренировку» ведёт по упражнениям по одному с весом, техникой и «🔁 Как в прошлый раз»;
-  /days — дни зала; напоминания накануне вечером и в день зала; сам предлагает обед (12:00) и ужин (18:00) по меню с учётом съеденного, в 20:00 план на завтра (что разморозить, заготовки), в субботу список покупок; /foto off — выключить;
-- ⚖️ Вес: число в чат; 📊 Прогресс: график веса, итоги недели (/week); шаги: /steps 8500.
-- 📏 талия раз в неделю (/waist 92); 📸 фото прогресса раз в 2 недели (/photo) и сравнение до/после (/compare)."""
+  у каждого упражнения картинка, вес и техника; «▶️ Начать тренировку» ведёт по упражнениям по одному,
+  запоминает веса, «🔁 Как в прошлый раз»; /days пн ср пт — дни зала;
+- 🍲 Рецепт: 20 готовых ПП-рецептов для Термомикса + «✨ Новый рецепт от AI»;
+- 📅 Меню дня, 🌙 Меню на завтра, 🛒 Покупки: меню на неделю и список продуктов под него;
+- 🍽 Дневник: фото еды в чат → бот считает КБЖУ и записывает; /eat гречка 200 г; кнопки воды;
+- ⚖️ Вес: просто число в чат; 📊 Прогресс: график веса, итоги недели (/week); шаги: /steps 8500;
+- 📏 талия (/waist 92); 📸 фото прогресса (/photo) и сравнение до/после (/compare);
+- напоминания сами: утром план дня (/remind 7 — время, /remind off — выкл), в 12:00 и 18:00 — что съесть,
+  в 20:00 — план на завтра (меню, заготовки, что разморозить, зал), в субботу 10:00 — покупки,
+  в 11/15/21 — прислать фото еды, если не прислал (/foto off — выкл);
+- 👩‍🍳 Семья: /family — бот присылает ссылку; её пересылают жене, она открывает и жмёт «Запустить».
+  У жены свой полный бот (своя норма, дневник, тренировки) + закупка по субботам и заготовки (вс, ср, пт)
+  с кнопками «✅ Всё купила» / «✅ Приготовила» — мужу приходит уведомление. /family off — отключить."""
 
 TIMEOUT = 45
 MODEL_TIMEOUT = 25  # если модель не ответила за 25 с — переходим к запасной
@@ -121,21 +133,31 @@ def _gemini_call(body):
     raise last
 
 
-def _gemini(system, question):
+def _msgs(question, history):
+    """История [(role, text)] + новый вопрос; роли user/assistant, первая — user."""
+    msgs = [(r, t) for r, t in (history or []) if t]
+    while msgs and msgs[0][0] != "user":
+        msgs.pop(0)
+    return msgs + [("user", question)]
+
+
+def _gemini(system, question, history=None):
     return _gemini_call({
         "system_instruction": {"parts": [{"text": system}]},
-        "contents": [{"role": "user", "parts": [{"text": question}]}],
+        "contents": [{"role": "model" if r == "assistant" else "user", "parts": [{"text": t}]}
+                     for r, t in _msgs(question, history)],
         "generationConfig": {"maxOutputTokens": 1500, "temperature": 0.6},
     })
 
 
-def _groq(system, question):
+def _groq(system, question, history=None):
     r = _post(
         "https://api.groq.com/openai/v1/chat/completions",
         headers={"Authorization": f"Bearer {os.environ['GROQ_API_KEY']}"},
         json={
             "model": os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": question}],
+            "messages": [{"role": "system", "content": system}]
+            + [{"role": r, "content": t} for r, t in _msgs(question, history)],
             "max_tokens": 1500,
             "temperature": 0.6,
         },
@@ -144,14 +166,14 @@ def _groq(system, question):
     return r.json()["choices"][0]["message"]["content"]
 
 
-def _claude(system, question):
+def _claude(system, question, history=None):
     from anthropic import Anthropic
 
     resp = Anthropic(timeout=TIMEOUT).messages.create(
         model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5"),
         max_tokens=1200,
         system=system,
-        messages=[{"role": "user", "content": question}],
+        messages=[{"role": r, "content": t} for r, t in _msgs(question, history)],
     )
     return "".join(b.text for b in resp.content if b.type == "text")
 
@@ -248,13 +270,13 @@ def analyze_food(text="", image_bytes=None):
     return _parse_food_json(raw)
 
 
-def ask(question, user):
+def ask(question, user, history=None, today=""):
     if not provider():
         return "AI-тренер выключен. Добавь в файл .env ключ GEMINI_API_KEY (бесплатно, см. README)."
-    system = _system_for(user)
+    system = _system_for(user) + (f"\nСегодня: {today}" if today else "")
     text = _with_fallback({
-        "gemini": lambda: _gemini(system, question),
-        "groq": lambda: _groq(system, question),
-        "claude": lambda: _claude(system, question),
+        "gemini": lambda: _gemini(system, question, history),
+        "groq": lambda: _groq(system, question, history),
+        "claude": lambda: _claude(system, question, history),
     }).strip()
     return text.replace("**", "").replace("##", "") or "Не смог ответить, попробуй переформулировать."

@@ -606,7 +606,7 @@ def finish_onboarding(chat, user, d, days):
 # ======================= тренировки =======================
 
 def workout_kb(u, w):
-    others = [(f"🔀 {o['title'].split('·')[-1].strip()[:20]}", f"wsel:{o['key']}")
+    others = [(f"🔀 {o['title'].split('·')[0].strip()[:20]}", f"wsel:{o['key']}")
               for o in program(u) if o["key"] != w["key"]]
     return ikb([[("▶️ Начать тренировку", f"lg:{w['key']}")],
                 others,
@@ -838,8 +838,16 @@ def answer_with_coach(chat, uid, question):
     if not u:
         return
     bot.send_chat_action(chat, "typing")
+    now = datetime.now(TZ)
+    hist = store.chat_history(uid, (now - timedelta(hours=3)).isoformat(timespec="seconds"))
+    t = store.day_totals(uid, today().isoformat())
+    ctx = (f"{WD_NAMES[today().weekday()]}, {now:%H:%M}; съедено {t['kcal']} ккал / белок {t['protein']} г; "
+           f"следующая тренировка — {next_workout(u)['title']}"
+           + ("; сегодня день зала" if today().weekday() in train_days(u) else ""))
     try:
-        reply = coach.ask(question, u)
+        reply = coach.ask(question, u, history=hist, today=ctx)
+        store.log_chat(uid, now.isoformat(timespec="seconds"), "user", question)
+        store.log_chat(uid, now.isoformat(timespec="seconds"), "assistant", reply)
     except Exception as e:
         logging.exception("coach error")
         code = getattr(getattr(e, "response", None), "status_code", None)

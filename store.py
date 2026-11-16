@@ -58,6 +58,9 @@ CREATE TABLE IF NOT EXISTS daily(
 CREATE TABLE IF NOT EXISTS notices(
     user_id INTEGER, day TEXT, kind TEXT, PRIMARY KEY(user_id, day, kind)
 );
+CREATE TABLE IF NOT EXISTS chat_log(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, ts TEXT, role TEXT, text TEXT
+);
 CREATE TABLE IF NOT EXISTS family(
     helper_id INTEGER PRIMARY KEY, owner_id INTEGER, name TEXT
 );
@@ -101,6 +104,21 @@ def init():
 
 def all_users():
     return [dict(r) for r in _all("SELECT * FROM users WHERE kcal IS NOT NULL")]
+
+
+# ---------- история диалога с AI-тренером ----------
+
+def log_chat(user_id, ts, role, text):
+    with closing(_conn()) as c, c:
+        c.execute("INSERT INTO chat_log(user_id, ts, role, text) VALUES(?,?,?,?)", (user_id, ts, role, text[:3000]))
+        c.execute("DELETE FROM chat_log WHERE user_id=? AND id NOT IN "
+                  "(SELECT id FROM chat_log WHERE user_id=? ORDER BY id DESC LIMIT 20)", (user_id, user_id))
+
+
+def chat_history(user_id, since, limit=8):
+    rows = _all("SELECT role, text FROM chat_log WHERE user_id=? AND ts>=? ORDER BY id DESC LIMIT ?",
+                (user_id, since, limit))
+    return [(r["role"], r["text"]) for r in reversed(rows)]
 
 
 # ---------- семья: помощник (жена) получает закупку и готовку ----------
