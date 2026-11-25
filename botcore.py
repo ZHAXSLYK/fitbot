@@ -32,6 +32,7 @@ import store  # noqa: E402
 from data import (  # noqa: E402
     BY_NUM,
     COOK_DAYS,
+    ASSISTED,
     DEFAULT_TRAIN_DAYS,
     EX_IMG,
     ex_group,
@@ -197,7 +198,7 @@ def motivation(u):
     ups = []
     for name, h in month.items():
         first = allh[name]["first"]["weight"]
-        if h["last"]["weight"] > first > 0:
+        if first > 0 and better(name, h["last"]["weight"], first):
             ups.append(f"{name.lower()} {first:g}→{h['last']['weight']:g} кг")
     if ups:
         lines.append("💪 Рост весов: " + ", ".join(ups[:3]) + ".")
@@ -218,7 +219,22 @@ def scheme_info(scheme):
     return {"sets": sets, "lo": lo, "hi": hi, "secs": bool(re.search(r"×\s*\d+(?:–\d+)?\s*сек", scheme))}
 
 
+def better(name, new, old):
+    """Вес вырос? Для гравитрона (противовес) лучше — меньше."""
+    return (new < old) if name in ASSISTED else (new > old)
+
+
+def fmt_sets(sets_txt):
+    """'14x10,16x12,16x12' → '14 кг × 10 · 16 кг × 12,12'."""
+    pairs = [(float(a), b) for a, b in (p.split("x") for p in sets_txt.split(",") if "x" in p)]
+    order = list(dict.fromkeys(w for w, _ in pairs))
+    return " · ".join((f"{w:g} кг" if w else "свой вес") + " × " + ",".join(r for w2, r in pairs if w2 == w)
+                      for w in order)
+
+
 def fmt_lift(l, secs=False):
+    if l.get("sets") and not secs:
+        return fmt_sets(l["sets"])
     reps = ",".join(str(r) for r in l["reps"])
     if secs:
         return f"{reps} сек"
@@ -238,6 +254,10 @@ def lift_advice(name, scheme, last):
     if info["hi"] is None:
         return "📈 Попробуй на 1 повтор больше в каждом подходе"
     done = len(reps) >= info["sets"] and min(reps[: info["sets"]]) >= info["hi"]
+    if name in ASSISTED:
+        if not done:
+            return f"Цель: {info['hi']} повторов во всех {info['sets']} подходах с противовесом {w:g} кг"
+        return f"📈 Уменьши противовес: {max(w - 5, 0):g} кг"
     if not done:
         return f"Цель: {info['hi']} повторов во всех {info['sets']} подходах{f' с {w:g} кг' if w else ''}"
     if not w:
@@ -690,7 +710,7 @@ def workout_done(c):
         chat,
         f"✅ Записал! На этой неделе: {week} из {len(train_days(u))}. Всего тренировок: {total}.\n"
         f"Следующая — <b>{next_workout(u)['title']}</b>.\n\n{motivation(u)}\n\n"
-        "Сейчас — белок + углеводы: протеиновый смузи, рецепт №16.",
+        "Сейчас — белок + углеводы: смузи банан-творог, рецепт №16 (или творог 200 г + банан).",
         reply_markup=ikb([[("🥤 Рецепт смузи", "r:16")]]),
     )
 
@@ -890,6 +910,10 @@ def answer_with_coach(chat, uid, question):
     ctx = (f"{WD_NAMES[today().weekday()]}, {now:%H:%M}; съедено {t['kcal']} ккал / белок {t['protein']} г; "
            f"следующая тренировка — {next_workout(u)['title']}"
            + ("; сегодня день зала" if today().weekday() in train_days(u) else ""))
+    done = store.lifts_for_day(uid, today().isoformat())
+    if done:
+        ctx += ("; сегодня в зале записано: " +
+                "; ".join(f"{l['exercise']} — {fmt_lift(l)}" for l in done))
     try:
         reply = coach.ask(question, u, history=hist, today=ctx)
         store.log_chat(uid, now.isoformat(timespec="seconds"), "user", question)
@@ -962,7 +986,7 @@ def finish_lifts(chat, uid, data):
         f"🏁 <b>Силовая записана!</b> Упражнений: {data['logged']}, тоннаж: {int(data.get('volume', 0))} кг{rec}\n"
         f"На этой неделе: {week} из {len(train_days(u))}. Следующая — <b>{nxt['title']}</b>.{fin}\n\n"
         f"{motivation(u)}\n\n"
-        "После зала — белок + углеводы: протеиновый смузи, рецепт №16.",
+        "После зала — белок + углеводы: смузи банан-творог, рецепт №16 (или творог 200 г + банан).",
         reply_markup=ikb([[("🥤 Рецепт смузи", "r:16")]]),
     )
 
@@ -1003,18 +1027,21 @@ def lift_input(chat, uid, text, data):
         return bot.send_message(chat, "Не понял 🙂 " + LIFT_HELP + "\nПропустить упражнение: <code>-</code>")
     if not all(0 <= sw <= 500 and 0 < r <= 300 for sw, r in sets):
         return bot.send_message(chat, "Проверь числа: вес 0–500 кг, повторы 1–300.")
-    w = max(sw for sw, _ in sets)                       # рабочий (самый тяжёлый) вес — по нему прогрессия
+    name0 = ex_parts(find_workout(data["key"])["exercises"][data["idx"]])[0]
+    # рабочий вес — самый тяжёлый (у гравитрона — самый маленький противовес); по нему прогрессия
+    w = min(sw for sw, _ in sets) if name0 in ASSISTED else max(sw for sw, _ in sets)
     reps = [r for sw, r in sets if sw == w]
     shown = " · ".join(f"{sw:g} кг × {','.join(str(r) for sw2, r in sets if sw2 == sw)}"
                        for sw in dict.fromkeys(sw for sw, _ in sets)) if len({sw for sw, _ in sets}) > 1 else None
     name, sch, _, _ = ex_parts(find_workout(data["key"])["exercises"][data["idx"]])
     prev = store.lift_history(uid).get(name)
-    best = max(prev["first"]["weight"], prev["last"]["weight"]) if prev else None
-    store.add_lift(uid, today().isoformat(), name, w, reps)
+    pick = min if name in ASSISTED else max
+    best = pick(prev["first"]["weight"], prev["last"]["weight"]) if prev else None
+    store.add_lift(uid, today().isoformat(), name, w, reps, sets)
     data["logged"] = data.get("logged", 0) + 1
     data["volume"] = data.get("volume", 0) + sum(sw * r for sw, r in sets)
     note = ""
-    if best is not None and w > best and w > 0:
+    if best is not None and better(name, w, best) and w > 0:
         note = " 🏆 новый рекорд!"
         data.setdefault("records", []).append(f"{name} {w:g} кг")
     bot.send_message(chat, f"✔ {name}: {shown or fmt_lift({'weight': w, 'reps': reps}, scheme_info(sch)['secs'])}{note}")
@@ -1076,7 +1103,7 @@ def week_report(u, start, end, title):
     grown = []
     for ex, h in store.lift_history(uid, since=s).items():
         before = store.last_lift(uid, ex, before_day=s)
-        if before and h["last"]["weight"] > before["weight"]:
+        if before and better(ex, h["last"]["weight"], before["weight"]):
             grown.append(f"{ex} {before['weight']:g}→{h['last']['weight']:g}")
     if grown:
         lines.append("💪 Рост весов: " + "; ".join(grown[:5]))

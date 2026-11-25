@@ -90,7 +90,8 @@ def _all(sql, args=()):
 
 
 MIGRATIONS = [
-    "ALTER TABLE users ADD COLUMN train_days TEXT",   # дни зала: "0,2,4" (0 = пн)
+    "ALTER TABLE users ADD COLUMN train_days TEXT",
+    "ALTER TABLE lifts ADD COLUMN sets TEXT",   # все подходы: "14x10,16x12,16x12"   # дни зала: "0,2,4" (0 = пн)
     "ALTER TABLE users ADD COLUMN meal_remind INTEGER DEFAULT 1",  # напоминать прислать фото еды
 ]
 
@@ -327,9 +328,21 @@ def daily_avgs(user_id, since, until):
 
 # ---------- рабочие веса ----------
 
-def add_lift(user_id, day, exercise, weight, reps):
-    _exec("INSERT INTO lifts(user_id, day, exercise, weight, reps) VALUES(?,?,?,?,?)",
-          (user_id, day, exercise, weight, ",".join(str(r) for r in reps)))
+def add_lift(user_id, day, exercise, weight, reps, sets=None):
+    """weight/reps — рабочий вес и повторы с ним (для прогрессии); sets — все подходы [(вес, повторы)]."""
+    sets_txt = ",".join(f"{w:g}x{r}" for w, r in sets) if sets else None
+    _exec("INSERT INTO lifts(user_id, day, exercise, weight, reps, sets) VALUES(?,?,?,?,?,?)",
+          (user_id, day, exercise, weight, ",".join(str(r) for r in reps), sets_txt))
+
+
+def lifts_for_day(user_id, day):
+    rows = _all("SELECT * FROM lifts WHERE user_id=? AND day=? ORDER BY id", (user_id, day))
+    out = []
+    for r in rows:
+        r = dict(r)
+        r["reps"] = [int(x) for x in (r["reps"] or "").split(",") if x]
+        out.append(r)
+    return out
 
 
 def last_lift(user_id, exercise, before_day=None):
