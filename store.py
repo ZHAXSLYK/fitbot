@@ -58,6 +58,9 @@ CREATE TABLE IF NOT EXISTS daily(
 CREATE TABLE IF NOT EXISTS notices(
     user_id INTEGER, day TEXT, kind TEXT, PRIMARY KEY(user_id, day, kind)
 );
+CREATE TABLE IF NOT EXISTS img_cache(
+    url TEXT PRIMARY KEY, file_id TEXT
+);
 CREATE TABLE IF NOT EXISTS chat_log(
     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, ts TEXT, role TEXT, text TEXT
 );
@@ -104,6 +107,18 @@ def init():
 
 def all_users():
     return [dict(r) for r in _all("SELECT * FROM users WHERE kcal IS NOT NULL")]
+
+
+# ---------- кэш картинок Telegram (file_id вместо повторной загрузки по ссылке) ----------
+
+def img_file_id(url):
+    rows = _all("SELECT file_id FROM img_cache WHERE url=?", (url,))
+    return rows[0]["file_id"] if rows else None
+
+
+def save_img_file_id(url, file_id):
+    _exec("INSERT INTO img_cache(url, file_id) VALUES(?,?) ON CONFLICT(url) DO UPDATE SET file_id=excluded.file_id",
+          (url, file_id))
 
 
 # ---------- история диалога с AI-тренером ----------

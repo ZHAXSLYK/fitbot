@@ -254,33 +254,74 @@ def img_url(name=None, key=None):
     return f"{IMG_BASE}/{k}.jpg" if k else None
 
 
+def safe_err(e):
+    """Текст ошибки без токена бота (он бывает в URL запроса)."""
+    return str(e).replace(TOKEN, "<TOKEN>") if TOKEN else str(e)
+
+
+def _photo_src(url):
+    return store.img_file_id(url) or url
+
+
+def _remember_photo(url, msg):
+    try:
+        if msg and getattr(msg, "photo", None) and not store.img_file_id(url):
+            store.save_img_file_id(url, msg.photo[-1].file_id)
+    except Exception as e:
+        logging.warning("img cache: %s", safe_err(e))
+
+
+def _send_photo(chat, url, **kw):
+    """Фото с повтором: прокси PythonAnywhere иногда обрывает запрос. Повтор — уже по ссылке, если file_id протух."""
+    last = None
+    for src in (_photo_src(url), url, url):
+        try:
+            msg = bot.send_photo(chat, src, **kw)
+            _remember_photo(url, msg)
+            return msg
+        except Exception as e:
+            last = e
+            logging.warning("photo failed %s: %s", url, safe_err(e))
+    raise last
+
+
 def send_with_photo(chat, text, url, reply_markup=None):
     """Картинка с подписью; если подпись длинная или картинка не загрузилась — картинка и текст отдельно."""
     if url:
         try:
             if len(text) <= 1000:
-                return bot.send_photo(chat, url, caption=text, reply_markup=reply_markup)
-            bot.send_photo(chat, url)
-        except Exception as e:
-            logging.warning("photo failed %s: %s", url, e)
+                return _send_photo(chat, url, caption=text, reply_markup=reply_markup)
+            _send_photo(chat, url)
+        except Exception:
+            pass
     return bot.send_message(chat, text, reply_markup=reply_markup)
 
 
 def send_workout_album(chat, w):
-    """Альбом: по картинке на упражнение + кардио, подпись — номер и название."""
-    media = []
-    for i, ex in enumerate(w["exercises"], 1):
-        url = img_url(ex[0])
-        if url:
-            media.append(types.InputMediaPhoto(url, caption=f"{i}. {ex[0]}"))
+    """Альбом: по картинке на упражнение + кардио, подпись — номер и название. С повтором и кэшем file_id."""
+    items = [(img_url(ex[0]), f"{i}. {ex[0]}") for i, ex in enumerate(w["exercises"], 1) if img_url(ex[0])]
     fk = FINISHER_IMG.get(w["key"])
     if fk:
-        media.append(types.InputMediaPhoto(img_url(key=fk), caption="Кардио"))
-    if len(media) >= 2:
+        items.append((img_url(key=fk), "Кардио"))
+    items = items[:10]
+    if len(items) < 2:
+        return
+    for attempt in range(3):
+        use_cache = attempt == 0
+        media = [types.InputMediaPhoto(_photo_src(u) if use_cache else u, caption=cap) for u, cap in items]
         try:
-            bot.send_media_group(chat, media[:10])
+            msgs = bot.send_media_group(chat, media)
+            for (u, _), m in zip(items, msgs):
+                _remember_photo(u, m)
+            return
         except Exception as e:
-            logging.warning("album failed: %s", e)
+            logging.warning("album failed (try %s): %s", attempt + 1, safe_err(e))
+    # альбом так и не ушёл — шлём картинки по одной, чтобы фото всё равно были
+    for u, cap in items:
+        try:
+            _send_photo(chat, u, caption=cap)
+        except Exception:
+            pass
 
 
 def human_scheme(sch):
@@ -912,9 +953,9 @@ def finish_lifts(chat, uid, data):
     fin = f"\n\nОсталось кардио:\n{w['finisher']}" if w.get("finisher") and not data.get("ended") else ""
     if fin and FINISHER_IMG.get(w["key"]):
         try:
-            bot.send_photo(chat, img_url(key=FINISHER_IMG[w["key"]]), caption=w["finisher"])
+            _send_photo(chat, img_url(key=FINISHER_IMG[w["key"]]), caption=w["finisher"])
         except Exception as e:
-            logging.warning("finisher photo failed: %s", e)
+            logging.warning("finisher photo failed: %s", safe_err(e))
     bot.send_message(
         chat,
         f"🏁 <b>Силовая записана!</b> Упражнений: {data['logged']}, тоннаж: {int(data.get('volume', 0))} кг{rec}\n"
@@ -1724,7 +1765,7 @@ def tick(now=None):
                 bot.send_message(hid, text, reply_markup=kb)
                 sent += 1
             except Exception as e:
-                logging.warning("tick helper %s %s failed: %s", kind, hid, e)
+                logging.warning("tick helper %s %s failed: %s", kind, hid, safe_err(e))
         if (CHECK_HOUR <= hour < EVENING_HOUR and d.weekday() in days
                 and day not in store.workout_days(uid, day)
                 and not store.notice_sent(uid, day, "check")):
@@ -1748,7 +1789,7 @@ def tick(now=None):
                 bot.send_message(uid, text, reply_markup=kb)
                 sent += 1
             except Exception as e:
-                logging.warning("tick %s %s failed: %s", kind, uid, e)
+                logging.warning("tick %s %s failed: %s", kind, uid, safe_err(e))
     return sent
 
 
