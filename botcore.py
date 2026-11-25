@@ -910,6 +910,7 @@ def answer_with_coach(chat, uid, question):
 # ======================= журнал весов =======================
 
 LIFT_HELP = ("Пришли вес и повторы через пробел: <code>60 8 8 7 7</code>\n"
+             "Разный вес в подходах — через точку: <code>14 10. 16 12 12</code>\n"
              "Свой вес — ноль: <code>0 12 10 10</code> · Планка — секунды: <code>0 45 50 40</code>")
 
 
@@ -929,7 +930,7 @@ def ask_lift(chat, uid, data):
         lines.append(f"🔥 <b>Сначала разминка:</b> {w['warmup']}\n")
     lines.append("🏋️ " + ex_block(data["idx"] + 1, ex, uid, total=len(w["exercises"])))
     lines.append("\nСделай все подходы и пришли: вес и повторы через пробел, например <code>60 8 8 8 8</code>. "
-                 "Без веса — <code>0 12 12 12</code>.")
+                 "Разный вес — через точку: <code>14 10. 16 12 12</code>. Без веса — <code>0 12 12 12</code>.")
     store.set_state(uid, "wait_lift", data)
     last = store.last_lift(uid, ex[0])
     row = [("⏭ Пропустить", "lgs:skip"), ("🏁 Закончить", "lgs:end")]
@@ -973,30 +974,50 @@ def next_lift(chat, uid, data):
     ask_lift(chat, uid, data)
 
 
+def parse_sets(t):
+    """Подходы [(вес, повторы)]. Понимает:
+    «60 8 8 8» — один вес; «14 10. 16 12 12» или «14 10, 16 12 12» — разные веса (группы через «. », «, », «;», «/»);
+    «14x10 16x12 16x12» — вес×повторы."""
+    t = t.replace("х", "x").replace("×", "x").replace("*", "x")
+    pairs = re.findall(r"(\d+(?:[.,]\d+)?)\s*x\s*(\d+)", t)
+    if pairs:
+        return [(float(a.replace(",", ".")), int(b)) for a, b in pairs]
+    sets = []
+    for grp in re.split(r"\.\s+|,\s+|;|/|\n", t):
+        nums = [float(x.replace(",", ".")) for x in re.findall(r"\d+(?:[.,]\d+)?", grp)]
+        if len(nums) >= 2:
+            sets += [(nums[0], int(r)) for r in nums[1:9]]
+        elif len(nums) == 1 and sets:      # одно число после группы — ещё подход с тем же весом
+            sets.append((sets[-1][0], int(nums[0])))
+    return sets
+
+
 def lift_input(chat, uid, text, data):
     t = (text or "").strip().lower()
     if t in ("-", "—", "пропустить", "skip"):
         return next_lift(chat, uid, data)
     if t in ("стоп", "всё", "все", "конец", "stop"):
         return finish_lifts(chat, uid, data)
-    nums = [x.replace(",", ".") for x in re.findall(r"\d+(?:[.,]\d+)?", t)]
-    if len(nums) < 2:
+    sets = parse_sets(t)
+    if not sets:
         return bot.send_message(chat, "Не понял 🙂 " + LIFT_HELP + "\nПропустить упражнение: <code>-</code>")
-    w = float(nums[0])
-    reps = [int(float(x)) for x in nums[1:9]]
-    if not (0 <= w <= 500 and all(0 < r <= 300 for r in reps)):
+    if not all(0 <= sw <= 500 and 0 < r <= 300 for sw, r in sets):
         return bot.send_message(chat, "Проверь числа: вес 0–500 кг, повторы 1–300.")
+    w = max(sw for sw, _ in sets)                       # рабочий (самый тяжёлый) вес — по нему прогрессия
+    reps = [r for sw, r in sets if sw == w]
+    shown = " · ".join(f"{sw:g} кг × {','.join(str(r) for sw2, r in sets if sw2 == sw)}"
+                       for sw in dict.fromkeys(sw for sw, _ in sets)) if len({sw for sw, _ in sets}) > 1 else None
     name, sch, _, _ = ex_parts(find_workout(data["key"])["exercises"][data["idx"]])
     prev = store.lift_history(uid).get(name)
     best = max(prev["first"]["weight"], prev["last"]["weight"]) if prev else None
     store.add_lift(uid, today().isoformat(), name, w, reps)
     data["logged"] = data.get("logged", 0) + 1
-    data["volume"] = data.get("volume", 0) + w * sum(reps)
+    data["volume"] = data.get("volume", 0) + sum(sw * r for sw, r in sets)
     note = ""
     if best is not None and w > best and w > 0:
         note = " 🏆 новый рекорд!"
         data.setdefault("records", []).append(f"{name} {w:g} кг")
-    bot.send_message(chat, f"✔ {name}: {fmt_lift({'weight': w, 'reps': reps}, scheme_info(sch)['secs'])}{note}")
+    bot.send_message(chat, f"✔ {name}: {shown or fmt_lift({'weight': w, 'reps': reps}, scheme_info(sch)['secs'])}{note}")
     next_lift(chat, uid, data)
 
 
