@@ -34,6 +34,7 @@ from data import (  # noqa: E402
     COOK_DAYS,
     DEFAULT_TRAIN_DAYS,
     EX_IMG,
+    ex_group,
     FINISHER_IMG,
     PROGRAMS,
     RECIPE_CATS,
@@ -308,7 +309,11 @@ def ex_block(i, ex, uid=None, total=None):
 def workout_text(w, uid=None):
     lines = [f"🏋️ <b>{w['title']}</b> · {w.get('time', '70–80 мин')}\n",
              "🔥 Разминка: " + w.get("warmup", "5 мин эллипс + лёгкий подход первого упражнения.") + "\n"]
+    group = None
     for i, ex in enumerate(w["exercises"], 1):
+        if ex_group(ex[0]) != group:
+            group = ex_group(ex[0])
+            lines.append(f"<b>{group}</b>")
         lines.append(ex_block(i, ex, uid) + "\n")
     if w.get("finisher"):
         lines.append(w["finisher"])
