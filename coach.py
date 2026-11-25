@@ -111,7 +111,7 @@ def _system_for(user):
 
 # Если основная модель перегружена (503/429) — пробуем следующую
 GEMINI_MODELS = [m.strip() for m in os.getenv(
-    "GEMINI_MODEL", "gemini-flash-lite-latest,gemini-flash-latest").split(",") if m.strip()]
+    "GEMINI_MODEL", "gemini-flash-latest,gemini-flash-lite-latest").split(",") if m.strip()]
 
 
 def _gemini_call(body):

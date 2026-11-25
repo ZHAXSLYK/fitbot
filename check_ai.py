@@ -34,7 +34,7 @@ try:
                                 "messages": [{"role": "user", "content": "Скажи «ок»"}]})
         ok = show(r)
     elif gem:
-        models = [m.strip() for m in os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest,gemini-flash-latest").split(",")]
+        models = [m.strip() for m in os.getenv("GEMINI_MODEL", "gemini-flash-latest,gemini-flash-lite-latest").split(",")]
         ok = False
         r = None
         for model in models:
