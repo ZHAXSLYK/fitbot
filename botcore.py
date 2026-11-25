@@ -64,6 +64,8 @@ BTN_TOMORROW = "🌙 Меню на завтра"
 COMMANDS = [
     ("workout", "Тренировка на сегодня"),
     ("days", "Дни зала: /days пн ср пт"),
+    ("today", "Что записано в зале сегодня"),
+    ("fix", "Исправить вес: /fix жим ногами 40 20. 120 10 10 10 10"),
     ("foto", "Напоминания о фото еды: /foto on или off"),
     ("family", "Подключить жену к закупке и готовке"),
     ("menu", "Меню на сегодня"),
@@ -912,8 +914,13 @@ def answer_with_coach(chat, uid, question):
            + ("; сегодня день зала" if today().weekday() in train_days(u) else ""))
     done = store.lifts_for_day(uid, today().isoformat())
     if done:
-        ctx += ("; сегодня в зале записано: " +
-                "; ".join(f"{l['exercise']} — {fmt_lift(l)}" for l in done))
+        _, last_key = store.last_workout(uid)
+        w_done = find_workout(last_key)
+        ctx += (f"\nСЕГОДНЯ УЖЕ СДЕЛАНА тренировка {w_done['title'] if w_done else ''}. "
+                "Журнал весов за сегодня (это правильные данные, они уже сохранены, заново присылать не нужно): " +
+                "; ".join(f"{l['exercise']} — {fmt_lift(l)}" for l in done) +
+                ". Если клиент говорит, что что-то записано неверно, — скажи отправить исправление командой, "
+                "например: /fix жим ногами 40 20. 120 10 10 10 10. Посмотреть журнал за сегодня — /today.")
     try:
         reply = coach.ask(question, u, history=hist, today=ctx)
         store.log_chat(uid, now.isoformat(timespec="seconds"), "user", question)
@@ -1591,6 +1598,52 @@ def ai_recipe(c):
 
 
 # ======================= дни зала и напоминания =======================
+
+def today_lifts_text(uid):
+    done = store.lifts_for_day(uid, today().isoformat())
+    if not done:
+        return "Сегодня в журнале весов пока пусто."
+    lines = ["🏋️ <b>Записано сегодня:</b>"]
+    for l in done:
+        lines.append(f"• {html.escape(l['exercise'])}: {fmt_lift(l)}")
+    lines.append("\nИсправить: <code>/fix жим ногами 40 20. 120 10 10 10 10</code> "
+                 "(название можно коротко — «жим ногами», «гравитрон»)")
+    return "\n".join(lines)
+
+
+@bot.message_handler(commands=["today"])
+def c_today(m):
+    if require_user(m.chat.id, m.from_user.id):
+        bot.send_message(m.chat.id, today_lifts_text(m.from_user.id))
+
+
+@bot.message_handler(commands=["fix"])
+def c_fix(m):
+    uid = m.from_user.id
+    if not require_user(m.chat.id, uid):
+        return
+    arg = (m.text or "").split(maxsplit=1)[1] if len((m.text or "").split(maxsplit=1)) > 1 else ""
+    mt = re.match(r"\s*([^\d]+?)\s+(\d.*)$", arg)
+    if not mt:
+        return bot.send_message(m.chat.id, "Формат: <code>/fix жим ногами 40 20. 120 10 10 10 10</code>\n\n"
+                                + today_lifts_text(uid))
+    query, sets_txt = mt.group(1).lower().strip(), mt.group(2)
+    done = store.lifts_for_day(uid, today().isoformat())
+    words = [w for w in re.findall(r"[а-яёa-z]+", query) if len(w) > 2]
+    hits = [l for l in done if all(w[:5] in l["exercise"].lower() for w in words)]
+    if len(hits) != 1:
+        return bot.send_message(m.chat.id, ("Не нашёл такое упражнение за сегодня." if not hits else
+                                            "Подходит несколько упражнений — напиши название точнее.")
+                                + "\n\n" + today_lifts_text(uid))
+    sets = parse_sets(sets_txt)
+    if not sets:
+        return bot.send_message(m.chat.id, "Не понял подходы. Пример: <code>40 20. 120 10 10 10 10</code>")
+    l = hits[0]
+    w = min(x for x, _ in sets) if l["exercise"] in ASSISTED else max(x for x, _ in sets)
+    store.update_lift(l["id"], w, [r for x, r in sets if x == w], sets)
+    bot.send_message(m.chat.id, f"✔ Исправил: {html.escape(l['exercise'])} — "
+                     f"{fmt_sets(','.join(f'{x:g}x{r}' for x, r in sets))}")
+
 
 @bot.message_handler(commands=["days"])
 def c_days(m):

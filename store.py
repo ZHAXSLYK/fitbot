@@ -335,6 +335,11 @@ def add_lift(user_id, day, exercise, weight, reps, sets=None):
           (user_id, day, exercise, weight, ",".join(str(r) for r in reps), sets_txt))
 
 
+def update_lift(lift_id, weight, reps, sets):
+    _exec("UPDATE lifts SET weight=?, reps=?, sets=? WHERE id=?",
+          (weight, ",".join(str(r) for r in reps), ",".join(f"{w:g}x{r}" for w, r in sets), lift_id))
+
+
 def lifts_for_day(user_id, day):
     rows = _all("SELECT * FROM lifts WHERE user_id=? AND day=? ORDER BY id", (user_id, day))
     out = []
