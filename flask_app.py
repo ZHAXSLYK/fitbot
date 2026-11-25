@@ -16,6 +16,20 @@ def index():
     return "Фитнес-бот работает ✅"
 
 
+@app.get("/version")
+def version():
+    """Какая версия программы сейчас работает (для проверки после обновления)."""
+    import subprocess
+    import data
+    try:
+        rev = subprocess.run(["git", "-C", os.path.dirname(os.path.abspath(__file__)), "log", "--oneline", "-1"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        rev = "?"
+    days = "; ".join(f"{w['title']}: " + ", ".join(e[0] for e in w["exercises"]) for w in data.PROGRAM_3)
+    return f"{rev}\n{days}"
+
+
 @app.get("/tick")
 def tick():
     """Раз в час дёргает cron-job.org — бот рассылает напоминания вовремя.
