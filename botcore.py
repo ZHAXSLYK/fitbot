@@ -306,7 +306,7 @@ def ex_block(i, ex, uid=None, total=None):
 
 
 def workout_text(w, uid=None):
-    lines = [f"🏋️ <b>{w['title']}</b> · {w.get('time', '60–75 мин')}\n",
+    lines = [f"🏋️ <b>{w['title']}</b> · {w.get('time', '70–80 мин')}\n",
              "🔥 Разминка: " + w.get("warmup", "5 мин эллипс + лёгкий подход первого упражнения.") + "\n"]
     for i, ex in enumerate(w["exercises"], 1):
         lines.append(ex_block(i, ex, uid) + "\n")
